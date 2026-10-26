@@ -31,6 +31,20 @@ Date: 2026-10-26. This fork targets the physical Phicomm N1, S905D/GXL, 2 GB RAM
 - Default public CE fork points at `coreelec-22`, not our NG baseline.
 - Still to establish: exact source/commit set corresponding to the December 2025 P5 binary, N1 applicability, and TV-led output vs P5-to-HDR10/SDR color conversion.
 - Baseline does not claim P5 correction, native DV output, or FEL reconstruction.
+- The public `aml-4.9-21.1` Kodi branch diverges from the fixed 21.3 Kodi
+  source (243 commits ahead, 557 behind in GitHub's comparison). Many changes
+  are historical CoreELEC commits; this is not a clean, isolated P5 patch set.
+  Replacing the complete Kodi source with this branch would abandon our 21.3
+  baseline, so it has not been selected.
+
+## Build evidence
+
+- First Actions run: https://github.com/xufooo/N1-CoreELEC/actions/runs/40332896141
+- Overall result: cancelled. Before cancellation, `Build` failed at
+  `scripts/checkdeps`: missing `mkfontdir`, `mkfontscale`, `bdftopcf` and
+  `xsltproc`. The compiler was not reached; no firmware was produced.
+- Added the missing host packages `xfonts-utils` and `xsltproc` to the workflow.
+  This change still needs a real rerun. No device acceptance level is passed.
 
 ## User's existing USB
 
