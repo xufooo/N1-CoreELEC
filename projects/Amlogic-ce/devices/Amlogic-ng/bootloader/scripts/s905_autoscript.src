@@ -9,6 +9,18 @@ for i in 0 1; do
         if fatload usb ${i} ${initrd_addr} uInitrd; then
             if fatload usb ${i} ${env_addr} boot.ini; then
                 env import -t ${env_addr} ${filesize}
+                # Factory U-Boot supplies each box's addresses. The kernel and
+                # ap6xxx driver consume mac=/mac_wifi=, not Android key storage.
+                if test "${mac}" != ""; then
+                    setenv bootargs "${bootargs} mac=${mac}"
+                else
+                    if test "${ethaddr}" != ""; then
+                        setenv bootargs "${bootargs} mac=${ethaddr}"
+                    fi
+                fi
+                if test "${mac_wifi}" != ""; then
+                    setenv bootargs "${bootargs} mac_wifi=${mac_wifi}"
+                fi
                 if fatload usb ${i} ${dtb_mem_addr} ${dtb_name}; then
                     run boot_start
                 fi

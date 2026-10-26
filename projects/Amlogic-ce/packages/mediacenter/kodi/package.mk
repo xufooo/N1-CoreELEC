@@ -5,7 +5,7 @@
 
 PKG_NAME="kodi"
 PKG_VERSION="acc0fc66bc6af69c31a93c5d17e36900343263b7"
-PKG_SHA256=""
+PKG_SHA256="6cd5cc0661299960b11d63a08b579fb4edd3c099c4b8a96004823363015d81fc"
 PKG_LICENSE="GPL"
 PKG_SITE="http://www.kodi.tv"
 PKG_URL="https://github.com/CoreELEC/xbmc/archive/${PKG_VERSION}.tar.gz"

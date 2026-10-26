@@ -9,6 +9,7 @@ PKG_LICENSE="GPL"
 PKG_SITE="https://github.com/alpharde/udevil"
 PKG_URL="https://github.com/alpharde/udevil/archive/${PKG_VERSION}.tar.gz"
 PKG_DEPENDS_TARGET="toolchain systemd glib"
+PKG_STAMP="${NTFS3G}"
 PKG_LONGDESC="Mounts and unmounts removable devices and networks without a password."
 
 PKG_CONFIGURE_OPTS_TARGET="--disable-systemd \
@@ -29,9 +30,13 @@ post_makeinstall_target() {
   mkdir -p ${INSTALL}/usr/bin
     cp -PR src/udevil ${INSTALL}/usr/bin
 
-  mkdir -p ${INSTALL}/usr/sbin
-  echo -e '#!/bin/sh\nexec /usr/bin/mount -t ntfs3 "$@"' > ${INSTALL}/usr/sbin/mount.ntfs
-  chmod 755 ${INSTALL}/usr/sbin/mount.ntfs
+  # ntfs-3g installs mount.ntfs itself. A second helper here overwrites that
+  # symlink during image assembly and forces ntfs3 on kernels without it (NG).
+  if [ "${NTFS3G}" != "yes" ]; then
+    mkdir -p ${INSTALL}/usr/sbin
+    echo -e '#!/bin/sh\nexec /usr/bin/mount -t ntfs3 "$@"' > ${INSTALL}/usr/sbin/mount.ntfs
+    chmod 755 ${INSTALL}/usr/sbin/mount.ntfs
+  fi
 }
 
 post_install() {

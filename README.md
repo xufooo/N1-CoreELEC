@@ -5,6 +5,7 @@ device boot/playback and Dolby Vision have not been verified.
 
 - [Build and artifacts](docs/n1-build.md)
 - [Community sources and patch decisions](docs/n1-sources.md)
+- [Detailed patch review (Chinese)](docs/n1-patch-review.md)
 - [Device and playback acceptance](docs/n1-acceptance.md)
 
 Use a spare USB stick. The baseline contains no experimental DV patches.

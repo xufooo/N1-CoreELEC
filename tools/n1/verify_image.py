@@ -48,6 +48,15 @@ def verify(target):
         release = run('unsquashfs', '-cat', str(tmp / 'SYSTEM'), 'etc/os-release').decode()
         if '21.3-Omega-N1-r1' not in release:
             raise ValueError(f'Unexpected system version: {release}')
+        # NG has no ntfs3 kernel driver: the final image must use ntfs-3g.
+        listing = run('unsquashfs', '-ll', str(tmp / 'SYSTEM'), 'usr/sbin/mount.ntfs').decode()
+        if '-> /usr/bin/ntfs-3g' not in listing:
+            raise ValueError(f'Wrong NTFS helper in final image: {listing}')
+        run('unsquashfs', '-cat', str(tmp / 'SYSTEM'), 'usr/bin/ntfs-3g')
+        hwdb = run('unsquashfs', '-cat', str(tmp / 'SYSTEM'),
+                   'usr/lib/udev/hwdb.d/70-local-keyboard.hwdb').decode()
+        if 'evdev:input:b0005v0416p0300*\n KEYBOARD_KEY_c0041=enter' not in hwdb:
+            raise ValueError('Missing built-in YYYKQ remote confirm-key mapping')
         with tarfile.open(archives[0]) as archive:
             names = archive.getnames()
             for suffix in ('/target/KERNEL', '/target/SYSTEM', '/3rdparty/bootloader/uInitrd',

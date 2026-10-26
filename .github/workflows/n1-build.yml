@@ -6,7 +6,7 @@ on:
       target:
         description: Build target (image produces USB firmware)
         type: choice
-        options: [image, toolchain]
+        options: [audit, image, toolchain]
         default: image
 
 permissions:
@@ -47,7 +47,11 @@ jobs:
             .ccache
           key: n1-ng-21.3-v1-${{ github.sha }}-${{ github.run_id }}
           restore-keys: n1-ng-21.3-v1-
+      - name: Audit source and package integration
+        if: inputs.target == 'audit'
+        run: bash tools/n1/audit.sh
       - name: Build
+        if: inputs.target != 'audit'
         run: bash tools/n1/build.sh "$BUILD_TARGET"
       - name: Verify firmware contents
         if: success() && inputs.target == 'image'

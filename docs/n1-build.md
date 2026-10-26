@@ -1,6 +1,8 @@
 # Building N1
 
-Use the **N1 CoreELEC 21.3** Actions workflow, target `image`. Runs are manual;
+Use the **N1 CoreELEC 21.3** Actions workflow. Target `audit` checks the actual
+patch stack, NTFS package hooks, DTB and U-Boot script compilation; it does not
+compile a firmware. Target `image` produces USB firmware. Runs are manual;
 there is no scheduled build and no automatic release publication.
 
 On a supported non-root Linux x86_64 build host with CoreELEC dependencies:

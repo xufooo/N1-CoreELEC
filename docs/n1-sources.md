@@ -2,6 +2,10 @@
 
 Date: 2026-10-26. This fork targets the physical Phicomm N1, S905D/GXL, 2 GB RAM.
 
+For the current per-item findings and implemented MAC/NTFS fixes, see
+[the detailed patch review](n1-patch-review.md). Earlier candidate descriptions
+below are research provenance, not claims that every item still needs a patch.
+
 ## Fixed baseline
 
 - CoreELEC `21.3-Omega`: `fc61125e8900ab0c2593a29b615980ed0cd5b939`.
