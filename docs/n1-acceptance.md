@@ -13,17 +13,18 @@ Record each level separately; a CI check must not mark a device check passed.
    fork's USB versions after an independent backup; no legacy 9.2 in-place claim.
 5. Baseline playback: H.264/HEVC SDR, HDR10, automatic refresh rate, long NAS
    playback, seek, pause/resume, subtitles, passthrough and sound after exit.
-6. DV experiment: obtain MediaInfo and display model/capability first. Test P5,
+6. DV experiment: identify the input HDR profile and required output capabilities. Test P5,
    P8.1 and P7 MEL separately. Compare color to a known-correct decoder/output,
    verify clipping/black level, subtitle/OSD, seek and A/V sync. A TV's DV logo
    alone is not proof of correct reshaping or image quality. P7 FEL remains out
    of the initial target.
 
-Current device/display checks: **not performed**. The user's original USB has
-not been modified. Do not publish this as a verified playback release.
+Current device/display checks: **not performed**. Do not publish this as a
+verified playback release.
 
 For unresolved MAC/audio checks, copy `tools/n1/collect_device.sh` to the test
 system and run `sh collect_device.sh > /storage/n1-before.txt`; repeat after the
 failure into `n1-after.txt`. It only reads state and writes stdout. It does not
 restart services, change the mixer or upload logs. Compare addresses and audio
-transitions along with the exact display/AVR model and MediaInfo HDR profile.
+transitions along with the output capabilities and MediaInfo HDR profile.
+Keep test-device details and raw logs private unless explicitly approved for publication.
