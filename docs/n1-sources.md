@@ -35,6 +35,10 @@ below are research provenance, not claims that every item still needs a patch.
 - Default public CE fork points at `coreelec-22`, not our NG baseline.
 - Still to establish: exact source/commit set corresponding to the December 2025 P5 binary, N1 applicability, and TV-led output vs P5-to-HDR10/SDR color conversion.
 - Baseline does not claim P5 correction, native DV output, or FEL reconstruction.
+- Since 2026-10-27 the baseline carries one TV-led DV patch
+  (`linux-20-tv-led-dolby-vision-injection.patch`, ported from the public
+  `dv_injection.c` reference implementation); it is inert by default and untested
+  on hardware.
 - The public `aml-4.9-21.1` Kodi branch diverges from the fixed 21.3 Kodi
   source (243 commits ahead, 557 behind in GitHub's comparison). Many changes
   are historical CoreELEC commits; this is not a clean, isolated P5 patch set.

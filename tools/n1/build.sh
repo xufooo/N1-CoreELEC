@@ -23,7 +23,9 @@ manifest = {
     'kernel_commit': '50c8e8154c5aba3c7cd8438d04dd5fdd51733e41',
     'kodi_commit': 'acc0fc66bc6af69c31a93c5d17e36900343263b7',
     'project': 'Amlogic-ce', 'device': 'Amlogic-ng', 'board': 'Phicomm_N1',
-    'variant': 'baseline', 'dolby_vision_patches': False,
+    'variant': 'baseline', 'dolby_vision_patches': True,
+    'dolby_vision_patch_stack': ['linux-20-tv-led-dolby-vision-injection.patch'],
+    'dolby_vision_variant': 'tv-led', 'dolby_vision_device_tested': False,
     'device_boot_tested': False, 'playback_tested': False,
 }
 pathlib.Path('output/source-manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')

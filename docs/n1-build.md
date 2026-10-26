@@ -32,4 +32,7 @@ a previously unconfigured box to boot USB.
 The initial workflow timeout is 350 minutes. Whether the hosted runner has
 enough real disk/time is measured, not assumed. Cache restoration is an
 optimization, not proof of a successful or reproducible build. Baseline and
-experimental DV code must remain separately identifiable.
+experimental DV code must remain separately identifiable. The DV experiment
+is therefore carried by its own device patch
+(`projects/Amlogic-ce/devices/Amlogic-ng/patches/linux/linux-20-tv-led-dolby-vision-injection.patch`),
+not by edits to shared upstream sources.

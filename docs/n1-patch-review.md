@@ -51,9 +51,16 @@ exec /usr/bin/mount -t ntfs3 "$@"
    metadata injection 本身不解决 P5 视频重塑；P5 需要实际改变像素，而不只是发送不同 metadata。
    这说明必须找到后续 P5 实现及配套版本，不能拿 2024 的注入代码冒充 2025 的修复。
 
-**决定：当前不把任何上述 DV 代码合入基础版。** 尚未核实 2025 P5 二进制对应的完整
-NG 源码组合，不能据此承诺移植成功。输出为电视端 DV 与转成 HDR10/SDR 是不同实现，
-需在显示设备能力明确后选择。FEL 不列入第一轮目标。
+**决定（2026-10-26）：不把任何上述 DV 代码合入基础版。**
+
+**决定（2026-10-27 更新）：只合入 TV-led 注入补丁。** 复核后确认 N1（GXL）没有杜比授权
+DV Core，Player-led 与 FEL 在硬件上被排除，唯一可行路线是 TV-led。已按公开参考实现
+（`doppingkoala/common_drivers` 的 `dv_injection.c`）移植出
+`linux-20-tv-led-dolby-vision-injection.patch`：DM 元数据分包 + CRC32 + bit→像素 →
+写入 OSD canvas → 发送 VSIF。代码编译进内核但默认关闭（`dv_injection_enable=0`），
+元数据由用户态喂入。**未编译、未上机**，canvas 索引/像素编码/偏移等需实机标定。
+P5 色彩修正与 FEL 仍不列入第一轮目标。详见
+`docs/n1-dolby-vision-tv-led-port.md`。
 
 ## 本轮验证边界
 

@@ -1,0 +1,605 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: N1-CoreELEC project <dev@n1.local>
+Date: Tue, 27 Oct 2026 00:50:00 +0800
+Subject: [PATCH] media: amlogic: add TV-led Dolby Vision metadata injection
+
+TV-led Dolby Vision for SoCs without a licensed Dolby Vision core
+(Phicomm N1 / Amlogic GXL).
+
+The box does not reshape the picture.  Instead the Dolby Vision
+Display Management (DM) metadata is packetised into 128 byte Dolby
+Vision metadata packets (CRC32 in the last four bytes), every bit of
+a packet is turned into one picture pixel, and those pixels are
+written into the top rows of the OSD/GUI canvas.  A Dolby VSIF packet
+is sent alongside, so the TV knows that the signal carries Dolby
+Vision metadata and performs the reshaping itself.
+
+Neither the licensed DV Core hardware nor the dovi.ko blob is
+needed, so this works on GXL where the DV Core registers are not
+even assigned.
+
+The DM metadata bytes are handed over from user space through the
+"dv_metadata" module parameter (hex string); Kodi links libdovi and
+can extract the RPU/DM block from the stream.
+
+The packetisation, CRC and bit-to-pixel encoding follow the publicly
+published reference implementation
+(doppingkoala/common_drivers, drivers/media/video_sink/dv_injection.c),
+adapted to the 4.9 tree: the VSIF is sent with the existing
+vinfo->vout_device->fresh_tx_vsif_pkt() and the metadata is written
+into the OSD canvas obtained with canvas_read().
+
+The feature is compiled in but stays inert until
+"dv_injection_enable" is set, so other devices are unaffected.
+
+Signed-off-by: N1-CoreELEC project <dev@n1.local>
+---
+  drivers/amlogic/media/video_sink/Kconfig           |  11 +
+  drivers/amlogic/media/video_sink/Makefile          |   4 +
+  drivers/amlogic/media/video_sink/dv_injection.c    | 465 +++++++++++++++++++++
+  drivers/amlogic/media/video_sink/video.c           |  10 +
+  .../linux/amlogic/media/video_sink/dv_injection.h  |  22 +
+  5 files changed, 512 insertions(+)
+
+diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
+index 68c8f4b..375e8bd 100644
+--- a/drivers/amlogic/media/video_sink/Kconfig
++++ b/drivers/amlogic/media/video_sink/Kconfig
+@@ -29,4 +29,15 @@ config AMLOGIC_MEDIA_VIDEOCAPTURE
+     help
+ 		Internal Video Capture driver
+ 
++config AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++    bool "TV-led Dolby Vision metadata injection"
++    default y
++    depends on AMLOGIC_MEDIA_VIDEO
++    help
++		Embed the Dolby Vision Display Management metadata into the
++		top pixels of the OSD canvas and announce Dolby Vision with a
++		VSIF packet, so that the TV performs the reshaping itself.
++		This works on SoCs without a licensed Dolby Vision core.
++		The feature stays off until "dv_injection_enable" is set.
++
+ endmenu
+diff --git a/drivers/amlogic/media/video_sink/Makefile b/drivers/amlogic/media/video_sink/Makefile
+index 942f176..05d1d93 100644
+--- a/drivers/amlogic/media/video_sink/Makefile
++++ b/drivers/amlogic/media/video_sink/Makefile
+@@ -2,6 +2,10 @@ obj-y	+=	amvideo.o
+ CFLAGS_video.o := -I$(src)
+ amvideo-objs += video.o video_keeper.o vpp.o video_hw.o vpp_pq_process.o video_receiver.o video_reg.o video_signal_notify.o
+ 
++ifeq ($(CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION),y)
++amvideo-objs	+=	dv_injection.o
++endif
++
+ ifeq ($(CONFIG_AMLOGIC_MEDIA_VIDEOCAPTURE),y)
+ amvideo-objs	+=	amvideocap.o
+ endif
+diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
+new file mode 100644
+index 0000000..dae7214
+--- /dev/null
++++ b/drivers/amlogic/media/video_sink/dv_injection.c
+@@ -0,0 +1,465 @@
++/*
++ * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
++ *
++ * Ported from the publicly published "dv_injection" implementation
++ * (doppingkoala/common_drivers, dv_injection.c) and adapted to the
++ * CoreELEC 4.9 (amlogic-4.9-20) tree used by this project.
++ *
++ * Principle (TV-led Dolby Vision):
++ *   The box does not reshape the picture.  Instead the Dolby Vision
++ *   Display Management (DM) metadata is packetised into 128 byte
++ *   "Dolby Vision metadata packets", every bit of a packet is turned
++ *   into one picture pixel, and those pixels are written into the top
++ *   rows of the OSD/GUI canvas.  Together with a Dolby VSIF packet the
++ *   TV knows that the incoming signal carries Dolby Vision metadata
++ *   and performs the reshaping itself.
++ *
++ *   This needs neither the Dolby licensed "DV Core" hardware nor the
++ *   dovi.ko blob, so it works on SoCs without Dolby licensing (GXL).
++ *
++ * Metadata source:
++ *   The DM metadata bytes are handed over from user space (Kodi) via
++ *   the "dv_metadata" module parameter (hex string).  Kodi already
++ *   links libdovi, so it can extract the RPU/DM block from the stream.
++ *
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#include <linux/version.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/string.h>
++#include <linux/io.h>
++#include <linux/mm.h>
++#include <linux/ctype.h>
++#include <linux/slab.h>
++
++#include <linux/amlogic/media/vfm/vframe.h>
++#include <linux/amlogic/media/vout/vinfo.h>
++#include <linux/amlogic/media/vout/vout_notify.h>
++#include <linux/amlogic/media/canvas/canvas.h>
++
++#include <linux/amlogic/media/video_sink/dv_injection.h>
++
++/* Dolby Vision metadata packet format (as used by the reference
++ * implementation): 128 byte packets, CRC32 in the last 4 bytes.
++ */
++#define DV_INJ_NUM_BYTES_PER_PACKET	128
++#define DV_INJ_CRC_OFFSET		124
++#define DV_INJ_MAX_NUM_HDR_DM_PACKETS	5
++#define DV_INJ_NUM_HDR_DM_PACKET_REPEATS	3
++#define DV_INJ_BITS_PER_BYTE		8
++#define DV_INJ_PIXELS_PER_PKT		(DV_INJ_NUM_BYTES_PER_PACKET * \
++					 DV_INJ_BITS_PER_BYTE)
++#define DV_INJ_MAX_METADATA_SIZE	594
++
++/* pixel patterns used to carry one bit */
++#define DV_INJ_ODD_INJECTION		0xFFFFFFFF
++#define DV_INJ_EVEN_INJECTION		0xFF000000
++
++enum hdr_dm_packet_type {
++	DV_INJ_FIRST_AND_ONLY_PKT = 0,
++	DV_INJ_FIRST_OF_MULTIPLE_PKT,
++	DV_INJ_CONTINUING_PKT,
++	DV_INJ_LAST_OF_MULTIPLE_PKT
++};
++
++struct hdr_dm_packet {
++	u8 num_pkts;
++	u8 byte_data[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_NUM_BYTES_PER_PACKET];
++	u32 pixel_data[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_PIXELS_PER_PKT];
++};
++
++static bool dv_injection_enable;
++module_param(dv_injection_enable, bool, 0644);
++MODULE_PARM_DESC(dv_injection_enable,
++		 "\n enable TV-led Dolby Vision metadata injection\n");
++
++static char *dv_metadata = "";
++static unsigned int dv_metadata_len;
++module_param(dv_metadata_len, uint, 0644);
++MODULE_PARM_DESC(dv_metadata_len,
++		 "\n length of the DM metadata in bytes (0 = derive from hex)\n");
++
++static unsigned int osd_canvas;
++module_param(osd_canvas, uint, 0644);
++MODULE_PARM_DESC(osd_canvas,
++		 "\n canvas index the metadata is written to\n");
++
++static unsigned int osd_pixel_offset;
++module_param(osd_pixel_offset, uint, 0644);
++MODULE_PARM_DESC(osd_pixel_offset,
++		 "\n pixel offset inside the canvas where the metadata starts\n");
++
++static unsigned int bytes_per_pixel = 4;
++module_param(bytes_per_pixel, uint, 0644);
++MODULE_PARM_DESC(bytes_per_pixel,
++		 "\n bytes per pixel of the target canvas (4 = ARGB32)\n");
++
++static unsigned int odd_pattern = DV_INJ_ODD_INJECTION;
++module_param(odd_pattern, uint, 0644);
++MODULE_PARM_DESC(odd_pattern, "\n pixel pattern for a set bit\n");
++
++static unsigned int even_pattern = DV_INJ_EVEN_INJECTION;
++module_param(even_pattern, uint, 0644);
++MODULE_PARM_DESC(even_pattern, "\n pixel pattern for a cleared bit\n");
++
++static unsigned int packet_repeat = DV_INJ_NUM_HDR_DM_PACKET_REPEATS;
++module_param(packet_repeat, uint, 0644);
++MODULE_PARM_DESC(packet_repeat, "\n how often every packet is repeated\n");
++
++static bool always_send_vsif = true;
++module_param(always_send_vsif, bool, 0644);
++MODULE_PARM_DESC(always_send_vsif, "\n send the Dolby VSIF on every frame\n");
++
++static unsigned int dv_injection_log_level;
++module_param(dv_injection_log_level, uint, 0644);
++MODULE_PARM_DESC(dv_injection_log_level, "\n dv injection log level\n");
++
++#define dv_injection_log(level, x...) \
++	do { \
++		if ((level) <= dv_injection_log_level) \
++			pr_info(x); \
++	} while (0)
++
++static u8 dm_metadata[DV_INJ_MAX_METADATA_SIZE];
++static u32 dm_metadata_size;
++static struct hdr_dm_packet dm_packet;
++
++static int hex2bin(char c)
++{
++	if (c >= '0' && c <= '9')
++		return c - '0';
++	if (c >= 'a' && c <= 'f')
++		return c - 'a' + 10;
++	if (c >= 'A' && c <= 'F')
++		return c - 'A' + 10;
++	return -1;
++}
++
++/*
++ * Parse the hex string handed over from user space.  Returns the
++ * number of bytes parsed, or a negative error code.
++ */
++static int dv_injection_parse_metadata(const char *hex)
++{
++	size_t len;
++	size_t i;
++	u8 val;
++
++	if (!hex || !hex[0])
++		return -EINVAL;
++
++	len = strlen(hex);
++	if (len & 1)
++		return -EINVAL;
++	if (len / 2 > DV_INJ_MAX_METADATA_SIZE)
++		return -EINVAL;
++
++	for (i = 0; i < len / 2; i++) {
++		int hi = hex2bin(hex[i * 2]);
++		int lo = hex2bin(hex[i * 2 + 1]);
++
++		if (hi < 0 || lo < 0)
++			return -EINVAL;
++		val = (u8)((hi << 4) | lo);
++		dm_metadata[i] = val;
++	}
++	dm_metadata_size = len / 2;
++
++	if (dv_metadata_len && dv_metadata_len < dm_metadata_size)
++		dm_metadata_size = dv_metadata_len;
++
++	dv_injection_log(1, "dv injection: %u bytes of DM metadata\n",
++			 dm_metadata_size);
++	return dm_metadata_size;
++}
++
++/* CRC32 as used by the Dolby Vision metadata packets */
++static u32 dv_injection_crc32(const u8 *data, u32 size)
++{
++	u32 crc = 0xFFFFFFFF;
++	u32 i;
++	u32 j;
++
++	for (i = 0; i < size; i++) {
++		crc ^= (u32)data[i] << 24;
++		for (j = 0; j < 8; j++) {
++			if (crc & 0x80000000)
++				crc = (crc << 1) ^ 0x04C11DB7;
++			else
++				crc <<= 1;
++		}
++	}
++	return crc;
++}
++
++static enum hdr_dm_packet_type dv_injection_pkt_type(u8 cur, u8 num)
++{
++	if (cur == 0)
++		return (num == 1) ? DV_INJ_FIRST_AND_ONLY_PKT :
++			DV_INJ_FIRST_OF_MULTIPLE_PKT;
++	return ((cur + 1) != num) ? DV_INJ_CONTINUING_PKT :
++		DV_INJ_LAST_OF_MULTIPLE_PKT;
++}
++
++/*
++ * Split the DM metadata into Dolby Vision metadata packets and turn
++ * every bit into one picture pixel.
++ */
++static int dv_injection_form_packets(const u8 *metadata, u32 size)
++{
++	u8 pkt_num;
++	u8 *cur_pkt;
++	u32 cur_pkt_len;
++	u32 last_pkt_len;
++	u32 bytes_written = 0;
++	u32 pkt_offset;
++	enum hdr_dm_packet_type pkt_type;
++	u32 crc;
++	u8 *crc_ptr = (u8 *)&crc;
++	u8 byte_num;
++	u8 bit_num;
++	u8 injected_byte;
++	u32 num_pkts = 1;
++
++	if (!metadata || !size || size > DV_INJ_MAX_METADATA_SIZE)
++		return -EINVAL;
++
++	last_pkt_len = size;
++	if (last_pkt_len > 119) {
++		last_pkt_len -= 119;
++		while (last_pkt_len > 121) {
++			last_pkt_len -= 121;
++			num_pkts++;
++		}
++		if (last_pkt_len > 0)
++			num_pkts++;
++	}
++	if (num_pkts > DV_INJ_MAX_NUM_HDR_DM_PACKETS)
++		return -EINVAL;
++
++	memset(&dm_packet, 0, sizeof(dm_packet));
++	dm_packet.num_pkts = (u8)num_pkts;
++
++	for (pkt_num = 0; pkt_num < dm_packet.num_pkts; pkt_num++) {
++		cur_pkt = dm_packet.byte_data[pkt_num];
++		pkt_type = dv_injection_pkt_type(pkt_num, dm_packet.num_pkts);
++
++		if (pkt_type == DV_INJ_FIRST_AND_ONLY_PKT ||
++		    pkt_type == DV_INJ_FIRST_OF_MULTIPLE_PKT) {
++			cur_pkt[0] = (pkt_type == DV_INJ_FIRST_AND_ONLY_PKT) ?
++				0 : 0x40;
++			cur_pkt[1] = metadata[0];
++			cur_pkt[2] = 0;
++			cur_pkt[3] = (u8)(size >> 8);
++			cur_pkt[4] = (u8)(size & 0xFF);
++			cur_pkt_len = (pkt_type == DV_INJ_FIRST_AND_ONLY_PKT) ?
++				last_pkt_len : 119;
++			pkt_offset = 5;
++		} else {
++			cur_pkt[0] = (pkt_type == DV_INJ_LAST_OF_MULTIPLE_PKT) ?
++				0xC0 : 0x80;
++			cur_pkt[1] = metadata[0];
++			cur_pkt[2] = 0;
++			cur_pkt_len = (pkt_type == DV_INJ_LAST_OF_MULTIPLE_PKT) ?
++				last_pkt_len : 121;
++			pkt_offset = 3;
++		}
++
++		memcpy(&cur_pkt[pkt_offset], &metadata[bytes_written],
++		       cur_pkt_len);
++		bytes_written += cur_pkt_len;
++
++		if (bytes_written >= size)
++			memset(&cur_pkt[pkt_offset + cur_pkt_len], 0,
++			       DV_INJ_NUM_BYTES_PER_PACKET - 4 -
++			       pkt_offset - cur_pkt_len);
++
++		crc = dv_injection_crc32(cur_pkt, DV_INJ_NUM_BYTES_PER_PACKET - 4);
++		cur_pkt[DV_INJ_CRC_OFFSET] = crc_ptr[3];
++		cur_pkt[DV_INJ_CRC_OFFSET + 1] = crc_ptr[2];
++		cur_pkt[DV_INJ_CRC_OFFSET + 2] = crc_ptr[1];
++		cur_pkt[DV_INJ_CRC_OFFSET + 3] = crc_ptr[0];
++
++		/* bit -> pixel */
++		for (byte_num = 0; byte_num < DV_INJ_NUM_BYTES_PER_PACKET;
++		     byte_num++) {
++			injected_byte = dm_packet.byte_data[pkt_num][byte_num];
++			for (bit_num = 0; bit_num < DV_INJ_BITS_PER_BYTE;
++			     bit_num++) {
++				u32 pattern = (((injected_byte) >>
++						 (7 - bit_num)) & 1) ?
++					odd_pattern : even_pattern;
++
++				dm_packet.pixel_data[pkt_num]
++					[byte_num * DV_INJ_BITS_PER_BYTE +
++					 bit_num] = pattern;
++			}
++		}
++	}
++
++	dv_injection_log(1, "dv injection: formed %u packets from %u bytes\n",
++			 dm_packet.num_pkts, size);
++	return 0;
++}
++
++/*
++ * Write the packetised metadata into the top left corner of the OSD
++ * canvas.  This is the "top pixel" embedding the TV expects for
++ * TV-led Dolby Vision.
++ */
++static int dv_injection_write_canvas(void)
++{
++	struct canvas_s cs;
++	void *pixel_buffer;
++	u8 pkt_num;
++	u32 i;
++	u32 start_offset = osd_pixel_offset;
++	u32 pixels_per_pkt = DV_INJ_PIXELS_PER_PKT;
++	u32 pkt_stride;
++
++	memset(&cs, 0, sizeof(cs));
++	canvas_read(osd_canvas, &cs);
++	if (!cs.addr || !cs.width) {
++		dv_injection_log(1, "dv injection: canvas %u not valid\n",
++				 osd_canvas);
++		return -EINVAL;
++	}
++
++	pixel_buffer = phys_to_virt((phys_addr_t)cs.addr);
++	if (!pixel_buffer)
++		return -ENOMEM;
++
++	pkt_stride = pixels_per_pkt * bytes_per_pixel;
++
++	for (pkt_num = 0; pkt_num < dm_packet.num_pkts; pkt_num++) {
++		u8 *dst = (u8 *)pixel_buffer + start_offset * bytes_per_pixel +
++			pkt_num * packet_repeat * pkt_stride;
++
++		for (i = 0; i < packet_repeat; i++) {
++			if (bytes_per_pixel == 4) {
++				memcpy(dst + i * pkt_stride,
++				       dm_packet.pixel_data[pkt_num],
++				       pkt_stride);
++			} else {
++				u32 p;
++
++				for (p = 0; p < pixels_per_pkt; p++) {
++					u16 v = (u16)
++						(dm_packet.pixel_data[pkt_num][p] &
++						 0xffff);
++
++					memcpy(dst + i * pkt_stride + p * 2,
++					       &v, 2);
++				}
++			}
++		}
++	}
++
++	dv_injection_log(2, "dv injection: metadata written to canvas %u\n",
++			 osd_canvas);
++	return 0;
++}
++
++/*
++ * Tell the TV that the incoming signal is Dolby Vision.  The VSIF is
++ * built and sent by the existing HDMI TX code, no DV Core involved.
++ */
++static int dv_injection_send_vsif(void)
++{
++	const struct vinfo_s *vinfo = get_current_vinfo();
++	struct dv_vsif_para vsif;
++
++	if (!vinfo || !vinfo->vout_device ||
++	    !vinfo->vout_device->fresh_tx_vsif_pkt)
++		return -EINVAL;
++
++	memset(&vsif, 0, sizeof(vsif));
++	vsif.ver = 2;
++	vsif.length = 15;
++	vsif.vers.ver2.dobly_vision_signal = 1;	/* DV STD */
++	vsif.vers.ver2.low_latency = 0;
++
++	vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_DOLBYVISION,
++					      RGB_8BIT, &vsif, false);
++	dv_injection_log(2, "dv injection: VSIF sent\n");
++	return 0;
++}
++
++/*
++ * Called from the video sink for every frame.  Writes the metadata
++ * into the canvas and keeps the VSIF alive.
++ */
++void dv_injection_process_frame(struct vframe_s *vf)
++{
++	if (!dv_injection_enable)
++		return;
++	if (!dm_metadata_size)
++		return;
++
++	if (dv_injection_write_canvas() < 0)
++		return;
++
++	if (always_send_vsif)
++		dv_injection_send_vsif();
++}
++
++/*
++ * Feed the DM metadata (raw bytes) from user space.
++ */
++int dv_injection_set_metadata(const u8 *data, u32 size)
++{
++	if (!data || !size || size > DV_INJ_MAX_METADATA_SIZE)
++		return -EINVAL;
++
++	memcpy(dm_metadata, data, size);
++	dm_metadata_size = size;
++
++	return dv_injection_form_packets(dm_metadata, dm_metadata_size);
++}
++
++/*
++ * Parse the hex module parameter and build the packets.
++ */
++static int dv_injection_param_set(const char *val)
++{
++	int ret;
++
++	ret = dv_injection_parse_metadata(val);
++	if (ret < 0) {
++		dv_injection_log(1, "dv injection: bad metadata (%d)\n", ret);
++		return ret;
++	}
++	return dv_injection_form_packets(dm_metadata, dm_metadata_size);
++}
++
++static int dv_injection_param_get(char *buffer)
++{
++	return snprintf(buffer, PAGE_SIZE, "%s", dv_metadata);
++}
++
++module_param_cb(dv_metadata, param_cb(dv_injection_param_set,
++				      dv_injection_param_get),
++		&param_cnop_string, 0644);
++MODULE_PARM_DESC(dv_metadata,
++		 "\n Dolby Vision DM metadata as hex string\n");
++
++static int __init dv_injection_init(void)
++{
++	dv_injection_log(1, "dv injection: module loaded\n");
++	return 0;
++}
++
++static void __exit dv_injection_exit(void)
++{
++	dv_injection_log(1, "dv injection: module unloaded\n");
++}
++
++module_init(dv_injection_init);
++module_exit(dv_injection_exit);
++
++MODULE_DESCRIPTION("Amlogic TV-led Dolby Vision metadata injection");
++MODULE_AUTHOR("N1-CoreELEC project");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/video_sink/video.c
+index a93fd94..e0e90c6 100644
+--- a/drivers/amlogic/media/video_sink/video.c
++++ b/drivers/amlogic/media/video_sink/video.c
+@@ -44,6 +44,9 @@
+ #include <linux/clk.h>
+ #include <linux/debugfs.h>
+ #include <linux/amlogic/media/canvas/canvas.h>
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++#include <linux/amlogic/media/video_sink/dv_injection.h>
++#endif
+ #include <linux/amlogic/media/canvas/canvas_mgr.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/dma-contiguous.h>
+@@ -7787,6 +7790,13 @@ s32 update_vframe_src_fmt(
+ 	if (vf->src_fmt.fmt != VFRAME_SIGNAL_FMT_DOVI)
+ 		clear_vframe_dovi_md_info(vf);
+ 
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* TV-led Dolby Vision: embed the DM metadata into the OSD canvas
++	 * and keep the Dolby VSIF alive for every frame
++	 */
++	dv_injection_process_frame(vf);
++#endif
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL(update_vframe_src_fmt);
+diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
+new file mode 100644
+index 0000000..85f73aa
+--- /dev/null
++++ b/include/linux/amlogic/media/video_sink/dv_injection.h
+@@ -0,0 +1,22 @@
++/*
++ * Amlogic TV-led Dolby Vision metadata injection
++ *
++ * SPDX-License-Identifier: GPL-2.0-only
++ */
++
++#ifndef _DV_INJECTION_H
++#define _DV_INJECTION_H
++
++#include <linux/types.h>
++
++struct vframe_s;
++
++/* write the Dolby Vision DM metadata into the OSD canvas and keep the
++ * Dolby VSIF alive; called for every frame by the video sink
++ */
++void dv_injection_process_frame(struct vframe_s *vf);
++
++/* hand over the raw DM metadata bytes (user space / Kodi) */
++int dv_injection_set_metadata(const u8 *data, u32 size);
++
++#endif /* _DV_INJECTION_H */
