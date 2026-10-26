@@ -21,3 +21,9 @@ Record each level separately; a CI check must not mark a device check passed.
 
 Current device/display checks: **not performed**. The user's original USB has
 not been modified. Do not publish this as a verified playback release.
+
+For unresolved MAC/audio checks, copy `tools/n1/collect_device.sh` to the test
+system and run `sh collect_device.sh > /storage/n1-before.txt`; repeat after the
+failure into `n1-after.txt`. It only reads state and writes stdout. It does not
+restart services, change the mixer or upload logs. Compare addresses and audio
+transitions along with the exact display/AVR model and MediaInfo HDR profile.

@@ -59,7 +59,10 @@ NG 源码组合，不能据此承诺移植成功。输出为电视端 DV 与转�
 
 - 已完成：实际上游源码检查、NG 适用补丁栈在固定内核上依次应用、NTFS 安装 hook 回归、
   shell/Python/workflow 静态检查。
-- Linux 源码审计 CI 还会实际编译 DTB 和 U-Boot 脚本。
+- [Linux 源码审计 CI](https://github.com/xufooo/N1-CoreELEC/actions/runs/40338372781)
+  已成功（审计提交 `c52cdc251c72e9c2ea4fc44442ad95e185e1d672`）：完整适用补丁栈应用、
+  两种 NTFS 配置的安装 hook 测试、实际 N1 DTB 与 U-Boot 脚本编译均通过。
+  用时约 1 分 54 秒；这不是内核/Kodi/固件编译。
 - 没有完成：完整内核/Kodi 编译、最终固件内容检查、N1 启动、连续播放、视听检查。
 - 初轮 CI 是宿主依赖检查失败后取消；不把它算作编译成功。
 

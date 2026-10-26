@@ -48,7 +48,11 @@ below are research provenance, not claims that every item still needs a patch.
   `scripts/checkdeps`: missing `mkfontdir`, `mkfontscale`, `bdftopcf` and
   `xsltproc`. The compiler was not reached; no firmware was produced.
 - Added the missing host packages `xfonts-utils` and `xsltproc` to the workflow.
-  This change still needs a real rerun. No device acceptance level is passed.
+  A subsequent source audit ran successfully with these host dependencies.
+- Source audit: https://github.com/xufooo/N1-CoreELEC/actions/runs/40338372781
+  at `c52cdc251c72e9c2ea4fc44442ad95e185e1d672`; actual DTB and autoscript
+  compilation passed along with kernel patch application and NTFS package tests.
+  No full kernel/Kodi/firmware build or device acceptance level is passed yet.
 
 ## User's existing USB
 
