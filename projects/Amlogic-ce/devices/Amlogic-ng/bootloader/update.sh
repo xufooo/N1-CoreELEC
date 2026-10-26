@@ -75,6 +75,9 @@ for arg in $(cat /proc/cmdline); do
         [ -f /usr/bin/convert_dtname ] && . /usr/bin/convert_dtname $DT_ID
 
         case $DT_ID in
+          meson_gxl_s905d_phicomm_n1)
+            SUBDEVICE="Phicomm_N1"
+            ;;
           *odroid_c4*)
             SUBDEVICE="Odroid_C4"
             ;;
@@ -227,6 +230,18 @@ if [ -f $BOOT_ROOT/aml_autoscript ]; then
     echo "Found custom CoreELEC BL301, running inject_bl301 tool..."
     inject_bl301 -Y &>/dev/null
   fi
+fi
+
+if [ "${SUBDEVICE}" = "Phicomm_N1" ]; then
+  for file in s905_autoscript; do
+    if [ -s "/usr/share/bootloader/${file}" ]; then
+      cp -p "/usr/share/bootloader/${file}" "${BOOT_ROOT}/${file}"
+    fi
+  done
+  # The ramdisk is generated at release time, after SYSTEM is packed.
+  for ramdisk in "${UPDATE_DIR:-/storage/.update}"/.tmp/*/3rdparty/bootloader/uInitrd; do
+    [ -s "${ramdisk}" ] && cp -p "${ramdisk}" "${BOOT_ROOT}/uInitrd"
+  done
 fi
 
 [ "$(stat -c %d "$BOOT_ROOT")" != "$(stat -c %d /storage)" ] && mount -o ro,remount "$BOOT_ROOT"

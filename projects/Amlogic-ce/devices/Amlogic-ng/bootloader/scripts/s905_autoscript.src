@@ -1,0 +1,18 @@
+# Phicomm N1 USB boot. Adapted from RuralHunter and Damenly; see docs/n1-sources.md.
+# Only load this USB installation; do not change saved U-Boot environment.
+setenv env_addr "0x10400000"
+setenv kernel_addr "0x11000000"
+setenv initrd_addr "0x13000000"
+setenv boot_start booti ${kernel_addr} ${initrd_addr} ${dtb_mem_addr}
+for i in 0 1; do
+    if fatload usb ${i} ${kernel_addr} kernel.img; then
+        if fatload usb ${i} ${initrd_addr} uInitrd; then
+            if fatload usb ${i} ${env_addr} boot.ini; then
+                env import -t ${env_addr} ${filesize}
+                if fatload usb ${i} ${dtb_mem_addr} ${dtb_name}; then
+                    run boot_start
+                fi
+            fi
+        fi
+    fi
+done

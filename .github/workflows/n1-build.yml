@@ -1,0 +1,80 @@
+name: N1 CoreELEC 21.3
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build target (image produces USB firmware)
+        type: choice
+        options: [image, toolchain]
+        default: image
+
+permissions:
+  contents: read
+
+concurrency:
+  group: n1-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  firmware:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    env:
+      BUILD_TARGET: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Prepare hosted runner
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          # Only disposable, preinstalled SDKs on this GitHub-hosted VM.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get update
+          sudo apt-get install -y build-essential git python3 bc bison flex gawk gperf \
+            patchutils lzop rdfind libjson-perl libparse-yapp-perl libxml-parser-perl \
+            libncurses-dev libssl-dev autoconf automake libtool texinfo xmlstarlet \
+            mtools parted dosfstools e2fsprogs uuid-runtime zstd unzip wget file \
+            cpio rsync xz-utils squashfs-tools u-boot-tools device-tree-compiler
+          df -h
+      - name: Restore source and compiler caches
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            sources
+            .ccache
+          key: n1-ng-21.3-v1-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: n1-ng-21.3-v1-
+      - name: Build
+        run: bash tools/n1/build.sh "$BUILD_TARGET"
+      - name: Verify firmware contents
+        if: success() && inputs.target == 'image'
+        run: python3 tools/n1/verify_image.py target
+      - name: Save caches
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            sources
+            .ccache
+          key: n1-ng-21.3-v1-${{ github.sha }}-${{ github.run_id }}
+      - name: Upload logs and source manifest
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: n1-build-evidence-${{ github.run_id }}
+          path: output/
+          retention-days: 14
+      - name: Upload firmware
+        if: success() && inputs.target == 'image'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: n1-21.3-usb-baseline-${{ github.run_id }}
+          path: |
+            target/*Phicomm_N1.img.gz
+            target/*.tar
+            target/*.sha256
+            output/source-manifest.json
+          if-no-files-found: error
+          retention-days: 30

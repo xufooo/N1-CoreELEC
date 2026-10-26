@@ -24,6 +24,9 @@ if [ -f "$RELEASE_DIR/3rdparty/bootloader/config.ini" ]; then
 fi
 
 if [ "${SUBDEVICE}" != "Generic" ]; then
+  if [ "${SUBDEVICE}" = "Phicomm_N1" ]; then
+    mcopy "$RELEASE_DIR/3rdparty/bootloader/uInitrd" :: || show_error
+  fi
   if [ -f "$RELEASE_DIR/3rdparty/bootloader/${SUBDEVICE}_dtb.img" ]; then
     mcopy $RELEASE_DIR/3rdparty/bootloader/${SUBDEVICE}_dtb.img "::/dtb.img"
   fi

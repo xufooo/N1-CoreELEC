@@ -153,5 +153,11 @@
   # CoreELEC Subdevices
     SUBDEVICES="Odroid_N2 Odroid_N2L Odroid_C4 Odroid_HC4 LePotato LaFrite Radxa_Zero Radxa_Zero2"
 
+  # N1 uses factory U-Boot, a raw arm64 Image, and a separate uInitrd.
+    if [ "${N1_BUILD}" = "yes" ]; then
+      SUBDEVICES="Phicomm_N1"
+      KERNEL_TARGET="Image"
+    fi
+
   # TEE supported SoC
     TEE_SOC="S905X4"

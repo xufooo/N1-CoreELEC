@@ -1,0 +1,39 @@
+From: N1 community
+Subject: [PATCH] arm64: dts: add Phicomm N1 to the NG DTB build
+
+Adapted from RuralHunter via Damenly commit 53b9f488a97ecb5b4c5c9c80234d1499d41ccce4.
+Keep the 21.3 kernel, register the DTB in its normal dtbs target.
+
+--- a/arch/arm64/boot/dts/amlogic/Makefile
++++ b/arch/arm64/boot/dts/amlogic/Makefile
+@@ -70,6 +70,7 @@
+ dtb-$(CONFIG_ARM64) += coreelec-gxl/gxl_p212_2g_slowemmc.dtb
+ dtb-$(CONFIG_ARM64) += coreelec-gxl/gxl_p212_3g.dtb
+ dtb-$(CONFIG_ARM64) += coreelec-gxl/gxl_p230_2g.dtb
++dtb-$(CONFIG_ARM64) += coreelec-gxl/meson_gxl_s905d_phicomm_n1.dtb
+ dtb-$(CONFIG_ARM64) += coreelec-gxl/gxl_p230_k1_pro.dtb
+ dtb-$(CONFIG_ARM64) += coreelec-gxl/gxl_p230_k1_pro_ser.dtb
+ dtb-$(CONFIG_ARM64) += coreelec-gxl/gxl_p230_k2_pro_100mbit.dtb
+--- /dev/null
++++ b/arch/arm64/boot/dts/amlogic/coreelec-gxl/meson_gxl_s905d_phicomm_n1.dts
+@@ -0,0 +1,20 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/* Copyright (c) 2019 Rural Hunter
++ * Ported from Damenly/CoreELEC 53b9f488a97ecb5b4c5c9c80234d1499d41ccce4.
++ */
++#include "../gxl_p230_2g_buildroot.dts"
++#include "coreelec_gxl.dtsi"
++
++/ {
++    compatible = "phicomm,n1", "amlogic,s905d", "amlogic,meson-Gxl";
++    model = "Phicomm,N1";
++    coreelec-dt-id = "meson_gxl_s905d_phicomm_n1";
++
++    cvbs-connector {
++        status = "disabled";
++    };
++
++    dwc2_a {
++        controller-type = <1>; /* host */
++    };
++};

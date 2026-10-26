@@ -3,5 +3,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2018-present Team CoreELEC (https://coreelec.org)
 
+if [ "${N1_BUILD}" = "yes" ]; then
+  test -s "$BUILD/image/initramfs.cpio" || die "Missing N1 initramfs.cpio"
+  "$TOOLCHAIN/bin/mkimage" -C none -T ramdisk -A arm64 \
+    -d "$BUILD/image/initramfs.cpio" "$INSTALL/usr/share/bootloader/uInitrd"
+fi
+
 mkdir -p $RELEASE_DIR/3rdparty/bootloader
   cp -a $INSTALL/usr/share/bootloader/* $RELEASE_DIR/3rdparty/bootloader

@@ -33,6 +33,9 @@ mkpkg-temp
 
 # crap
 .DS_Store
+/output/
+/.coreelec/
+__pycache__/
 .directory
 
 # ignore git repos from update scripts

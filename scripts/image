@@ -378,7 +378,7 @@ if [ "${1}" = "release" -o "${1}" = "mkimage" -o "${1}" = "noobs" ]; then
         do_mkimage "${IMAGE_NAME}-${UBOOT_SYSTEM}"
       done
     else
-      [ "${PROJECT}" = "Amlogic-ce" ] && SUBDEVICES+=" Generic"
+      [ "${PROJECT}" = "Amlogic-ce" ] && [ "${N1_BUILD}" != "yes" ] && SUBDEVICES+=" Generic"
       for SUBDEVICE in ${SUBDEVICES}; do
         do_mkimage "${IMAGE_NAME}"
       done

@@ -1,4 +1,15 @@
-# CoreELEC
+# CoreELEC 21.3 for Phicomm N1
+
+Community USB baseline based on official `21.3-Omega`. Work in progress;
+device boot/playback and Dolby Vision have not been verified.
+
+- [Build and artifacts](docs/n1-build.md)
+- [Community sources and patch decisions](docs/n1-sources.md)
+- [Device and playback acceptance](docs/n1-acceptance.md)
+
+Use a spare USB stick. The baseline contains no experimental DV patches.
+
+# CoreELEC upstream
 
 CoreELEC is a 'Just enough OS' Linux distribution for running the award-winning [Kodi](https://kodi.tv) software on popular low-cost hardware. CoreELEC is a minor fork of [LibreELEC](https://libreelec.tv), it's built by the community for the community. [CoreELEC website](http://coreelec.org).
 

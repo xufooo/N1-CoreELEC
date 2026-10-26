@@ -231,7 +231,7 @@ make_target() {
     install -m 0644 $MULTIDTB_CONF $INSTALL/usr/share/bootloader
   fi
 
-  if [ "$BUILD_ANDROID_BOOTIMG" = "yes" ]; then
+  if [ "$BUILD_ANDROID_BOOTIMG" = "yes" ] && [ "${N1_BUILD}" != "yes" ]; then
     find_file_path bootloader/mkbootimg && source ${FOUND_PATH}
     mv -f arch/$TARGET_KERNEL_ARCH/boot/boot.img arch/$TARGET_KERNEL_ARCH/boot/$KERNEL_TARGET
   fi
