@@ -36,10 +36,10 @@ Signed-off-by: N1-CoreELEC project <dev@n1.local>
 ---
   drivers/amlogic/media/video_sink/Kconfig           |  11 +
   drivers/amlogic/media/video_sink/Makefile          |   4 +
-  drivers/amlogic/media/video_sink/dv_injection.c    | 465 +++++++++++++++++++++
+  drivers/amlogic/media/video_sink/dv_injection.c    | 488 +++++++++++++++++++++
   drivers/amlogic/media/video_sink/video.c           |  10 +
   .../linux/amlogic/media/video_sink/dv_injection.h  |  22 +
-  5 files changed, 512 insertions(+)
+  5 files changed, 535 insertions(+)
 
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
 index 68c8f4b..375e8bd 100644
@@ -78,10 +78,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000..dae7214
+index 0000000..5e48208
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,465 @@
+@@ -0,0 +1,488 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -160,7 +160,11 @@ index 0000000..dae7214
 +MODULE_PARM_DESC(dv_injection_enable,
 +		 "\n enable TV-led Dolby Vision metadata injection\n");
 +
-+static char *dv_metadata = "";
++/* The DM metadata is handed over from user space as a hex string.
++ * A fixed buffer keeps the parameter write bounded; it is re-parsed
++ * into DM metadata whenever user space writes it.
++ */
++static char dv_metadata[DV_INJ_MAX_METADATA_SIZE * 2 + 1];
 +static unsigned int dv_metadata_len;
 +module_param(dv_metadata_len, uint, 0644);
 +MODULE_PARM_DESC(dv_metadata_len,
@@ -211,7 +215,7 @@ index 0000000..dae7214
 +static u32 dm_metadata_size;
 +static struct hdr_dm_packet dm_packet;
 +
-+static int hex2bin(char c)
++static int dv_hex2bin(char c)
 +{
 +	if (c >= '0' && c <= '9')
 +		return c - '0';
@@ -242,8 +246,8 @@ index 0000000..dae7214
 +		return -EINVAL;
 +
 +	for (i = 0; i < len / 2; i++) {
-+		int hi = hex2bin(hex[i * 2]);
-+		int lo = hex2bin(hex[i * 2 + 1]);
++		int hi = dv_hex2bin(hex[i * 2]);
++		int lo = dv_hex2bin(hex[i * 2 + 1]);
 +
 +		if (hi < 0 || lo < 0)
 +			return -EINVAL;
@@ -505,13 +509,24 @@ index 0000000..dae7214
 +}
 +
 +/*
-+ * Parse the hex module parameter and build the packets.
++ * Parse the hex module parameter and build the packets.  The 4.9
++ * kernel has no param_cb()/param_cnop_string(), so the operations are
++ * supplied as a static kernel_param_ops and the value is a bounded
++ * buffer handed over through kp->arg.
 + */
-+static int dv_injection_param_set(const char *val)
++static int dv_injection_param_set(const char *val,
++				   const struct kernel_param *kp)
 +{
++	char *buf = (char *)kp->arg;
 +	int ret;
 +
-+	ret = dv_injection_parse_metadata(val);
++	if (!val || !buf)
++		return -EINVAL;
++	if (strlen(val) >= sizeof(dv_metadata))
++		return -EINVAL;
++
++	strcpy(buf, val);
++	ret = dv_injection_parse_metadata(buf);
 +	if (ret < 0) {
 +		dv_injection_log(1, "dv injection: bad metadata (%d)\n", ret);
 +		return ret;
@@ -519,14 +534,22 @@ index 0000000..dae7214
 +	return dv_injection_form_packets(dm_metadata, dm_metadata_size);
 +}
 +
-+static int dv_injection_param_get(char *buffer)
++static int dv_injection_param_get(char *buffer,
++				   const struct kernel_param *kp)
 +{
-+	return snprintf(buffer, PAGE_SIZE, "%s", dv_metadata);
++	char *buf = (char *)kp->arg;
++
++	if (!buf)
++		return 0;
++	return scnprintf(buffer, PAGE_SIZE, "%s", buf);
 +}
 +
-+module_param_cb(dv_metadata, param_cb(dv_injection_param_set,
-+				      dv_injection_param_get),
-+		&param_cnop_string, 0644);
++static const struct kernel_param_ops dv_metadata_ops = {
++	.set = dv_injection_param_set,
++	.get = dv_injection_param_get,
++};
++
++module_param_cb(dv_metadata, &dv_metadata_ops, &dv_metadata, 0644);
 +MODULE_PARM_DESC(dv_metadata,
 +		 "\n Dolby Vision DM metadata as hex string\n");
 +
