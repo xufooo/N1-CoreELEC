@@ -39,14 +39,29 @@ jobs:
             cpio rsync xz-utils squashfs-tools u-boot-tools device-tree-compiler \
             xfonts-utils xsltproc
           df -h
-      - name: Restore source and compiler caches
+      - name: Compute CPU fingerprint
+        run: |
+          # Host tools are compiled with -march=native.  A ccache entry
+          # produced on a different CPU family then yields binaries with
+          # instructions this runner cannot execute (SIGILL, e.g. "bison:
+          # Illegal instruction").  Scope the compiler cache to the CPU
+          # so objects are never reused across CPU families.
+          MODEL="$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | tr -cd 'a-zA-Z0-9' | cut -c1-24)"
+          FLAGS="$(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx|avx2|avx512f|sse4_2|bmi2)$' | sort | tr '\n' '-' )"
+          echo "CPU_SIG=${MODEL}-${FLAGS}" >> "$GITHUB_ENV"
+          echo "CPU_SIG=${MODEL}-${FLAGS}"
+      - name: Restore source cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: |
-            sources
-            .ccache
-          key: n1-ng-21.3-v1-${{ github.sha }}-${{ github.run_id }}
-          restore-keys: n1-ng-21.3-v1-
+          path: sources
+          key: n1-sources-v2-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: n1-sources-v2-
+      - name: Restore compiler cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .ccache
+          key: n1-ccache-v2-${{ env.CPU_SIG }}-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: n1-ccache-v2-${{ env.CPU_SIG }}-
       - name: Audit source and package integration
         if: inputs.target == 'audit'
         run: bash tools/n1/audit.sh
@@ -72,14 +87,18 @@ jobs:
       - name: Verify firmware contents
         if: success() && inputs.target == 'image'
         run: python3 tools/n1/verify_image.py target
-      - name: Save caches
+      - name: Save source cache
         if: always()
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
-          path: |
-            sources
-            .ccache
-          key: n1-ng-21.3-v1-${{ github.sha }}-${{ github.run_id }}
+          path: sources
+          key: n1-sources-v2-${{ github.sha }}-${{ github.run_id }}
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .ccache
+          key: n1-ccache-v2-${{ env.CPU_SIG }}-${{ github.sha }}-${{ github.run_id }}
       - name: Upload logs and source manifest
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
