@@ -635,6 +635,11 @@ CI `kernel` 目标 exit 0：日志含 `CC drivers/amlogic/media/video_sink/dv_in
 产出带本机不支持指令的二进制，导致 `bison: Illegal instruction`、`tar: Child died with
 signal 4` 这类与补丁无关的失败。已把编译缓存键加上 CPU 指纹，源码缓存单独保存。
 
+**整机镜像已构建**（CI run `40557456110`，提交 `c33315cfe2`）：
+`CoreELEC-Amlogic-ng.arm-21.3-Omega-N1-r1-Phicomm_N1.img.gz`
+sha256 `4789d67b845b6311693f7bb5978dfca78bc8f4e1f0b54b2001ef2a8767efb3a3`，
+CI 的固件打包校验通过。镜像不含杜比视界实测结论。
+
 必须在 N1 + 电视上标定的项目见
 `n1-dolby-vision-tv-led-port.md` §7（canvas 索引、像素格式与编码、起始偏移、电视侧接受度）。
 

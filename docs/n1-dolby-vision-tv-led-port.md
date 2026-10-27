@@ -1,6 +1,10 @@
 # N1 TV-led 杜比视界：移植实施说明
 
-> 状态：**已入库、内核编译通过、未上机**（2026-10-27 CI kernel 目标：exit 0，`CC …/dv_injection.o` + `LD …/amvideo.o`）。
+> 状态：**已入库、内核编译通过、整机镜像已构建、未上机**。
+> - 2026-10-27 CI `kernel` 目标：exit 0（`CC …/dv_injection.o` + `LD …/amvideo.o`）
+> - 2026-10-28 CI `image` 目标：exit 0，产出 N1 USB 镜像（见 §8）
+> - **仍未上机**：功能默认关闭，且 7 项标定未做
+>
 > 本文件描述已落地的内核补丁、如何启用、以及必须在实机上标定的项目。
 > 原理与取证过程见 [n1-dolby-vision-2026.md](n1-dolby-vision-2026.md) §9/§10。
 
@@ -102,7 +106,32 @@ dmesg | grep -i "dv injection"
 5. **VSIF 模式**：当前固定 DV STD（`dobly_vision_signal = 1`）；若电视要求 LL 或 tunnel 需调整
 6. **与 Kodi GUI 的冲突**：作者原始方案要求"Disable GUI scaling"，且暂停/按信息键会黑屏
 
-## 8. 验收
+## 8. 已构建的镜像
+
+| 项 | 值 |
+|---|---|
+| CI run | `40557456110`（源码提交 `c33315cfe2`） |
+| 镜像 | `CoreELEC-Amlogic-ng.arm-21.3-Omega-N1-r1-Phicomm_N1.img.gz`（231,503,774 B） |
+| sha256 | `4789d67b845b6311693f7bb5978dfca78bc8f4e1f0b54b2001ef2a8767efb3a3` |
+| 更新包 | `CoreELEC-Amlogic-ng.arm-21.3-Omega-N1-r1.tar`（277,739,520 B） |
+| sha256 | `22083a8a75d8e1c7e860f10f0c54d718fb0f06e7593c75289680a928dbd4ab06` |
+| 本地副本 | `.work/firmware/`（仓库内，不入库） |
+
+该次构建的日志证据：`patching file …/dv_injection.c` → `CC …/dv_injection.o` →
+`[140/357] [DONE] install linux:target`，随后 CI 的 `verify_image.py` 对打包镜像校验通过。
+
+> 该镜像**不含**杜比视界实测结论：功能默认关闭，需要按 §5/§7 手工开启与标定。
+
+## 8.1 构建环境需要记住的两件事
+
+1. **host 工具用 `-march=native` 编译**：跨 CPU 家族复用 ccache 会产出带本机不支持指令的
+   二进制（`bison: Illegal instruction`、`tar: Child died with signal 4`）。编译缓存键已加
+   CPU 指纹，源码缓存单独保存。
+2. **21.3 基线的部分上游源已失效**：rtmpdump、libmpeg2、megatools、udevil、grub、newt、
+   wireguard-linux-compat 各有一个项目级覆盖（`projects/Amlogic-ce/packages/`），改用仍然
+   存在的镜像；其中 4 个字节完全相同、哈希不变。
+
+## 9. 验收
 
 沿用 `docs/n1-acceptance.md`：P8 / P5 分别单独测试；**DV 徽标不能作为重塑正确的证据**，
 必须逐项核对亮度、色彩、字幕与音频。

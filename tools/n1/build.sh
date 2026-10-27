@@ -28,7 +28,7 @@ manifest = {
     'kodi_commit': 'acc0fc66bc6af69c31a93c5d17e36900343263b7',
     'project': 'Amlogic-ce', 'device': 'Amlogic-ng', 'board': 'Phicomm_N1',
     'variant': 'baseline', 'dolby_vision_patches': True,
-    'kernel_compiled': True if os.environ.get('BUILD_TARGET') == 'kernel' else False,
+    'kernel_compiled': os.environ.get('BUILD_TARGET') in ('kernel', 'image'),
     'dolby_vision_patch_stack': ['linux-20-tv-led-dolby-vision-injection.patch'],
     'dolby_vision_variant': 'tv-led', 'dolby_vision_device_tested': False,
     'device_boot_tested': False, 'playback_tested': False,
