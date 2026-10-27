@@ -52,7 +52,23 @@ jobs:
         run: bash tools/n1/audit.sh
       - name: Build
         if: inputs.target != 'audit'
-        run: bash tools/n1/build.sh "$BUILD_TARGET"
+        run: |
+          # The hosted runner intermittently dies with SIGILL in host
+          # packages (tar child), unrelated to the patch stack; retry the
+          # full image once.  A kernel build must not be retried: its
+          # failure is a real compile error.
+          if [ "$BUILD_TARGET" = kernel ]; then
+            bash tools/n1/build.sh "$BUILD_TARGET"
+            exit $?
+          fi
+          for attempt in 1 2; do
+            if bash tools/n1/build.sh "$BUILD_TARGET"; then
+              exit 0
+            fi
+            echo "image build attempt $attempt failed, retrying once"
+            sleep 30
+          done
+          exit 1
       - name: Verify firmware contents
         if: success() && inputs.target == 'image'
         run: python3 tools/n1/verify_image.py target

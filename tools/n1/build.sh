@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-case "${1:-image}" in image|toolchain) target=${1:-image};; *) echo 'Use image or toolchain' >&2; exit 2;; esac
+case "${1:-image}" in
+  image|toolchain) target=${1:-image};;
+  kernel) target=kernel;;
+  *) echo 'Use image, toolchain or kernel' >&2; exit 2;;
+esac
 test "$(uname -s)" = Linux || { echo 'Build requires a Linux host.' >&2; exit 1; }
 test "$(id -u)" != 0 || { echo 'Do not build as root.' >&2; exit 1; }
 
@@ -14,7 +18,7 @@ mkdir -p output .coreelec
 printf '%s\n' 'CCACHE_CACHE_SIZE="2G"' > .coreelec/options
 
 python3 - <<'PY'
-import json, pathlib, subprocess
+import json, os, pathlib, subprocess
 commit = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()
 manifest = {
     'upstream_tag': '21.3-Omega',
@@ -24,6 +28,7 @@ manifest = {
     'kodi_commit': 'acc0fc66bc6af69c31a93c5d17e36900343263b7',
     'project': 'Amlogic-ce', 'device': 'Amlogic-ng', 'board': 'Phicomm_N1',
     'variant': 'baseline', 'dolby_vision_patches': True,
+    'kernel_compiled': True if os.environ.get('BUILD_TARGET') == 'kernel' else False,
     'dolby_vision_patch_stack': ['linux-20-tv-led-dolby-vision-injection.patch'],
     'dolby_vision_variant': 'tv-led', 'dolby_vision_device_tested': False,
     'device_boot_tested': False, 'playback_tested': False,
@@ -56,6 +61,10 @@ finish() {
 trap finish EXIT
 if [ "$target" = toolchain ]; then
   ./scripts/build toolchain 2>&1 | tee output/build.log
+elif [ "$target" = kernel ]; then
+  # Fast validation of the kernel patch stack: build only the NG kernel
+  # package (and its dependencies), not the whole image.
+  ./scripts/build linux 2>&1 | tee output/build.log
 else
   make image 2>&1 | tee output/build.log
 fi
