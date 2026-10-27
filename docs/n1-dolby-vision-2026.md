@@ -626,6 +626,15 @@ HDR10+ 处理、IPT/tunnel 模式 —— 全部在 `amdolby_vision.c` 里（88 �
 新增头文件、改 `video.c`（在 `update_vframe_src_fmt()` 里挂钩）、`Makefile`、`Kconfig`。
 已用 `git apply --check` 对干净的 `linux-amlogic@amlogic-4.9-20` 树验证可应用。
 
-**状态：已入库、未编译、未上机。** 必须在 N1 + 电视上标定的项目见
+**状态：已入库、内核编译通过（2026-10-27）、未上机。**
+CI `kernel` 目标 exit 0：日志含 `CC drivers/amlogic/media/video_sink/dv_injection.o` 与
+`LD drivers/amlogic/media/video_sink/amvideo.o`，无 error。
+（整镜像构建随后另跑；期间修复了 CI 缓存问题，见下。）
+
+**CI 环境的坑（已修）**：host 工具用 `-march=native` 编译，跨 CPU 家族恢复的 ccache 会
+产出带本机不支持指令的二进制，导致 `bison: Illegal instruction`、`tar: Child died with
+signal 4` 这类与补丁无关的失败。已把编译缓存键加上 CPU 指纹，源码缓存单独保存。
+
+必须在 N1 + 电视上标定的项目见
 `n1-dolby-vision-tv-led-port.md` §7（canvas 索引、像素格式与编码、起始偏移、电视侧接受度）。
 
