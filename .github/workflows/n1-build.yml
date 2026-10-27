@@ -6,7 +6,7 @@ on:
       target:
         description: Build target (image produces USB firmware)
         type: choice
-        options: [audit, image, toolchain]
+        options: [audit, image, toolchain, kernel]
         default: image
 
 permissions:
