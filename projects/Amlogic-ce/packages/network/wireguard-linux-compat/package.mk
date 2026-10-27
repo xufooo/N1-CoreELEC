@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2019-present Team LibreELEC (https://libreelec.tv)
+# Copyright (C) 2024-present Team CoreELEC (https://coreelec.org)
+
+PKG_NAME="wireguard-linux-compat"
+PKG_VERSION="1.0.20220627"
+PKG_SHA256="362d412693c8fe82de00283435818d5c5def7f15e2433a07a9fe99d0518f63c0"
+PKG_LICENSE="GPLv2"
+PKG_SITE="https://www.wireguard.com"
+# The upstream snapshot URL intermittently answers 404 from build hosts and
+# its tarball has been regenerated upstream, which no longer matches the
+# recorded hash.  This mirror serves the byte identical original archive
+# (sha256 362d4126...), so the hash below stays valid.
+PKG_URL="https://sources.buildroot.net/wireguard-linux-compat/wireguard-linux-compat-$PKG_VERSION.tar.xz"
+PKG_DEPENDS_TARGET="toolchain linux libmnl"
+PKG_NEED_UNPACK="$LINUX_DEPENDS"
+PKG_LONGDESC="WireGuard VPN kernel module"
+PKG_TOOLCHAIN="manual"
+PKG_IS_KERNEL_PKG="yes"
+
+make_target() {
+  kernel_make KERNELDIR=$(kernel_path) -C src/ module
+}
+
+makeinstall_target() {
+  mkdir -p ${INSTALL}/$(get_full_module_dir)/${PKG_NAME}
+  cp src/*.ko ${INSTALL}/$(get_full_module_dir)/${PKG_NAME}
+}
