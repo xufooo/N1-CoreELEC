@@ -142,3 +142,73 @@ dmesg | grep -i "dv injection"
 - 4.9 实测依据：`doppingkoala` 的 21.1 NG 构建（`amvideo.inject_osd_metadata` 等 11 个参数）
 - 同代 21.3 成品：`avdvplus`（Player-led 路线，含 `inject_dolby_vsvdb()` 50 行可借鉴）
 - 社区口径：ZNDS 2024-08 "无杜比授权播放杜比视界…支持 s905x2 那代开始"
+
+## 10. 首次上机操作单
+
+按顺序做，**每一步都先看输出再进下一步**。
+
+### A. 启动与模块确认
+
+1. U 盘插 N1，上电，HDMI 接电视，等 CoreELEC 起来。
+2. 确认我们的模块在核心里：
+
+```sh
+ls /sys/module/amvideo/parameters/ | grep dv_
+# 期望：dv_injection_enable  dv_metadata  dv_metadata_len
+#       osd_canvas  osd_pixel_offset  bytes_per_pixel
+#       odd_pattern  even_pattern  packet_repeat
+#       always_send_vsif  dv_injection_log_level
+dmesg | grep -i "dv injection"
+```
+
+> 若 `ls` 没有输出，说明刷的不是带补丁的镜像（或内核没加载 amvideo）。
+
+### B. 目标电视是否支持 TV-led（只读取证）
+
+```sh
+cat /sys/class/drm/card*-HDMI-A-1/edid | xxd | head -40
+```
+
+看 EDID 里的 `rxcap.dv_info`（厂商扩展块）。同时在电视设置里确认有 Dolby Vision 选项、
+以及是否需要手动切到 DV 模式。
+
+### C. 取一份杜比视界样片的 DM 元数据
+
+镜像自带 `dovi_tool` 3.3.1：
+
+```sh
+dovi_tool extract -s /storage/sample.mkv        # 先看 RPU/DM 结构
+dovi_tool generate --profile 8 ...             # 需要重建时用
+```
+
+需要的是 **DM 块字节**（不是完整 RPU）。拿到后转成十六进制字符串。
+
+### D. 灌入并开启
+
+```sh
+echo 1 > /sys/module/amvideo/parameters/dv_injection_log_level
+echo "<DM_HEX>" > /sys/module/amvideo/parameters/dv_metadata
+echo 1 > /sys/module/amvideo/parameters/dv_injection_enable
+dmesg | tail -20
+```
+
+期望日志：`dv injection: N bytes of DM metadata`、`dv injection: formed M packets`、
+`dv injection: metadata written to canvas X`。
+
+### E. 标定（每次只改一个参数，改完立刻看画面）
+
+| 顺序 | 参数 | 试什么 | 判据 |
+|---|---|---|---|
+| 1 | `osd_canvas` | 0,1,2,… | dmesg 不再出现 "canvas N not valid" |
+| 2 | `bytes_per_pixel` | 4 → 2 | 画面顶部像素形态是否正确（不撕裂、不花屏） |
+| 3 | `odd_pattern` / `even_pattern` | 默认 0xFFFFFFFF / 0xFF000000，按 12bit 422 实际编码调整 | 电视是否识别出 DV 元数据 |
+| 4 | `osd_pixel_offset` | 0 → 递增 | 元数据像素必须落在画面最顶端且不可见 |
+| 5 | `packet_repeat` | 3 → 1/2 | 电视端是否稳定识别 |
+
+Kodi 侧要求：视频输出 **12-bit 4:2:2**、GUI 分辨率 **3840x2160**、开启 **Disable GUI scaling**；
+否则 GUI 会覆盖注入的顶部像素（作者原始实现里暂停/按信息键会黑屏）。
+
+### F. 验收
+
+按 [n1-acceptance.md](n1-acceptance.md)：DV 徽标不能作为重塑正确的证据，必须逐项核对
+亮度、色彩、字幕与音频；P5 与 P8 分开测。
