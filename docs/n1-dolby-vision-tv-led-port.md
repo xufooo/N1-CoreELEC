@@ -212,3 +212,51 @@ Kodi 侧要求：视频输出 **12-bit 4:2:2**、GUI 分辨率 **3840x2160**、�
 
 按 [n1-acceptance.md](n1-acceptance.md)：DV 徽标不能作为重塑正确的证据，必须逐项核对
 亮度、色彩、字幕与音频；P5 与 P8 分开测。
+
+## 11. U 盘静态验证（2026-10-28）
+
+镜像由用户写入 8.1 GB 外置 U 盘（`/dev/disk2`）后，对**盘上实际内容**做的只读核验。
+
+### 11.1 分区与文件
+
+| 项 | 结果 |
+|---|---|
+| 写前布局 | `COREELEC` FAT32 536.9 MB + `Linux` 7.5 GB（旧镜像残留） |
+| 写后布局 | `COREELEC` FAT32 536.9 MB + `Linux` **33.6 MB** + 7.5 GB 未分配 —— 与本镜像 MBR 一致 |
+| 镜像 MBR | 0x55AA 有效；分区1 FAT32(LBA) 起始 8192、1048576 扇区；分区2 Linux 起始 1056768、65536 扇区 |
+| FAT 内容 | `SYSTEM` `kernel.img` `dtb.img` `uInitrd` `boot.ini` `s905_autoscript` `aml_autoscript` `config.ini` `device_trees/` 齐全 |
+| `boot.ini` | `boot=UUID=2710-1342 disk=UUID=a078a0c8-… BOOT_IMAGE=kernel.img`（UUID 引导，无旧配置残留） |
+| `dtb.img` | 含 `meson_gxl_s905d_phicomm_n1`（N1 专用 DTB） |
+| `kernel.img` | 28,051,464 B，头部 `ARM\x64` @56 —— 合法未压缩 arm64 Image |
+
+### 11.2 DV 模块确实在这份内核里
+
+对 U 盘上的 `kernel.img` 直接做字符串检索，11 个模块参数名**全部命中**：
+
+```
+dv_injection_enable  dv_metadata  dv_metadata_len  osd_canvas
+osd_pixel_offset  bytes_per_pixel  odd_pattern  even_pattern
+packet_repeat  always_send_vsif  dv_injection_log_level
+```
+
+日志字符串同样在位：`dv injection: module loaded`、`dv injection: canvas %u not valid`、
+`dv injection: metadata written to canvas %u`、`dv injection: formed %u packets from %u bytes`。
+
+> 这一步把"模块编进了内核"从**构建日志推断**升级为**从出厂二进制读出的事实**。
+
+### 11.3 与构建产物的逐字节比对
+
+| 比对对象 | 结果 |
+|---|---|
+| U 盘 `kernel.img` vs 本地 `.img` 内偏移 `0xf00200` | ✅ 整份逐字节一致 |
+| U 盘 `SYSTEM` vs 更新包 `.tar` 的 `/target/SYSTEM` | ✅ 整份逐字节一致（md5 `9ff16ed999113c72a4e619db6db76468`） |
+| U 盘 `kernel.img` md5 vs 盘上 `kernel.img.md5` | ✅ `7146d7b6048d4af76656d5654e89b0ed` |
+
+### 11.4 尚未验证的部分
+
+以上全部是**静态**结论。以下必须实机确认，当前没有任何证据：
+
+- 模块是否在 N1 上正常加载（`/sys/module/amvideo/parameters/` 是否出现那 11 个参数）
+- 元数据能否被正确写入目标 canvas（canvas 索引、像素编码、起始偏移待标定）
+- 目标电视是否接受"顶部像素 + VSIF"的 TV-led 形式
+- 重塑后的亮度、色彩、字幕与音频是否正确（按 `n1-acceptance.md` 逐项核对，DV 徽标不作数）
