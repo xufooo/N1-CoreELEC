@@ -81,8 +81,7 @@ new file mode 100644
 index 0000000000..1111111111
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,585 @@
-+++ b/drivers/amlogic/media/video_sink/dv_injection.c
+@@ -0,0 +1,584 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
