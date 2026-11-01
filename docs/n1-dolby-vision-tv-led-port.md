@@ -71,7 +71,38 @@ N1（S905D / GXL）没有杜比授权的 DV Core，`dovi.ko` 也拿不到，因�
 | `even_pattern` | `0xFF000000` | bit=0 的像素值（**需实机标定**） |
 | `packet_repeat` | `3` | 每个包重复次数 |
 | `always_send_vsif` | `1` | 每帧都发 VSIF |
+| `dv_injection_path` | `0` | 元数据走哪条路：`0`=canvas 顶部像素（需标定），`1`=原生 HDMI EMP infoframe |
+| `dv_info_dump` | `0` | 写 `1` 把电视的 DV 能力（OUI/ver/emp_cap/yuv422_12bit）打进 dmesg |
 | `dv_injection_log_level` | `0` | 日志级别 |
+
+### 4.1 两条注入路径（canvas 与 EMP）
+
+补丁里同时实现了两条把元数据送到电视的路径，由 `dv_injection_path` 选择：
+
+| 路径 | 值 | 机制 | 前置条件 |
+|---|---|---|---|
+| canvas 顶部像素 | `0`（默认） | 把 DM 元数据按 bit 展开写进 OSD canvas 顶部像素，再发 VSIF | 需标定 canvas/偏移/像素模式 |
+| 原生 EMP infoframe | `1` | 直接调内核 `send_emp(EOTF_T_DOLBYVISION, YUV422_BIT12, NULL, md, len, false)` | 电视 EDID 必须声明 Dolby Vision（`ieeeoui == 0x00D046`），且输出为 12bit 4:2:2 |
+
+EMP 这条路的依据（`amdolby_vision.c`）：厂商本来就有 `send_emp()` 调用，
+但被 `need_send_emp_meta()` 里的 `is_meson_tm2_stbmode()` 限制在 **TM2 STB 模式**才走；
+而 `send_emp()` 自身只拒绝 `chip_type < MESON_CPU_ID_GXL`，**GXL 是允许的**。
+补丁因此绕开那个门禁，自己按需调用：
+
+```c
+send_emp(EOTF_T_DOLBYVISION, YUV422_BIT12, NULL, dm_metadata, dm_metadata_size, false);
+```
+
+喂进去的字节流与厂商 `convert_hdmi_metadata()` 的输出**完全一致**（该函数把
+`raw_metadata` 的 u32 字数组成字节流：`raw_metadata[0]` 的 bit23:8 是长度、
+bit7:0 是首字节，之后逐字展开），所以本模块拿到的 DM 字节流可以原样交给 `send_emp()`。
+
+两点实现细节：
+
+- EMP 发送放在 **workqueue** 里（`send_emp()` 会取 hdmitx 锁，不能在帧回调里直接调），
+  并且只在元数据更新后才重新发送，避免每帧重复下发。
+- 发送失败（返回 -1）时，配合 `dv_info_dump=1` 会把电视上报的 DV 能力打印出来，
+  用于区分"电视不支持"与"参数没配对"。
 
 ## 5. 启用步骤（实机）
 

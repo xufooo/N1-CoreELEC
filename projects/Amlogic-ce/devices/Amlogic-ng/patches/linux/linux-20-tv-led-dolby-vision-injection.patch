@@ -78,10 +78,11 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000..5e48208
+index 0000000000..1111111111
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,488 @@
+@@ -0,0 +1,585 @@
++++ b/drivers/amlogic/media/video_sink/dv_injection.c
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -113,6 +114,7 @@ index 0000000..5e48208
 +#include <linux/kernel.h>
 +#include <linux/module.h>
 +#include <linux/moduleparam.h>
++#include <linux/workqueue.h>
 +#include <linux/string.h>
 +#include <linux/io.h>
 +#include <linux/mm.h>
@@ -200,6 +202,22 @@ index 0000000..5e48208
 +static bool always_send_vsif = true;
 +module_param(always_send_vsif, bool, 0644);
 +MODULE_PARM_DESC(always_send_vsif, "\n send the Dolby VSIF on every frame\n");
++
++/* Which path carries the metadata to the sink.
++ * 0 = canvas top-pixel injection (needs calibration),
++ * 1 = native HDMI EMP infoframe (send_emp(); requires the sink to
++ *     advertise Dolby Vision in its EDID).
++ */
++static unsigned int dv_injection_path;
++module_param(dv_injection_path, uint, 0644);
++MODULE_PARM_DESC(dv_injection_path,
++		 "\n 0: canvas top-pixel injection, 1: native EMP infoframe\n");
++
++/* Write 1 to dump the sink Dolby Vision capabilities to dmesg. */
++static unsigned int dv_info_dump;
++module_param(dv_info_dump, uint, 0644);
++MODULE_PARM_DESC(dv_info_dump,
++		 "\n write 1 to dump the sink Dolby Vision capabilities\n");
 +
 +static unsigned int dv_injection_log_level;
 +module_param(dv_injection_log_level, uint, 0644);
@@ -477,8 +495,69 @@ index 0000000..5e48208
 +}
 +
 +/*
-+ * Called from the video sink for every frame.  Writes the metadata
-+ * into the canvas and keeps the VSIF alive.
++ * Dump what the sink advertises for Dolby Vision.  Both the EMP path and
++ * the VSIF path depend on these values, so logging them turns a silent
++ * -EINVAL from send_emp() into something actionable.
++ */
++static void dv_injection_dump_sink_info(void)
++{
++	struct vinfo_s *vinfo = get_current_vinfo();
++	const struct dv_info *dv;
++
++	if (!vinfo || !vinfo->vout_device || !vinfo->vout_device->dv_info) {
++		pr_info("dv injection: sink reports no Dolby Vision EDID block\n");
++		return;
++	}
++	dv = vinfo->vout_device->dv_info;
++	pr_info("dv injection: sink DV oui=0x%06x ver=%u len=%u emp_cap=%u yuv422_12bit=%u 2160p60=%u dimming=%u dm=%u.%u\n",
++		dv->ieeeoui, dv->ver, dv->length, dv->dv_emp_cap,
++		dv->sup_yuv422_12bit, dv->sup_2160p60hz,
++		dv->sup_global_dimming, dv->dm_major_ver, dv->dm_minor_ver);
++}
++
++/*
++ * Native EMP path: hand the DM metadata straight to the HDMI TX.
++ * send_emp() re-packs it into VS-EMDS infoframes, which is what a
++ * TV-led sink expects in the infoframe instead of in the top pixels.
++ *
++ * The DM metadata we accept is already the byte stream that
++ * amdolby_vision.c's convert_hdmi_metadata() would produce from its
++ * raw_metadata words, so no repacking is needed here.
++ */
++static int dv_injection_send_emp(void)
++{
++	int ret;
++
++	ret = send_emp(EOTF_T_DOLBYVISION, YUV422_BIT12, NULL,
++		       dm_metadata, dm_metadata_size, false);
++	if (ret < 0) {
++		dv_injection_log(1, "dv injection: send_emp failed (%d)\n", ret);
++		return ret;
++	}
++	dv_injection_log(2, "dv injection: send_emp %u bytes ok\n",
++			 dm_metadata_size);
++	return 0;
++}
++
++static bool dv_emp_dirty = true;
++static struct work_struct dv_emp_work;
++
++/*
++ * send_emp() takes the hdmitx locks, so it must not run inside the
++ * frame callback; the workqueue also coalesces repeated requests.
++ */
++static void dv_emp_worker(struct work_struct *work)
++{
++	if (!dv_injection_enable || !dm_metadata_size)
++		return;
++	dv_emp_dirty = false;
++	dv_injection_send_emp();
++}
++
++/*
++ * Called from the video sink for every frame.  Either writes the
++ * metadata into the canvas (top-pixel path) or makes sure the EMP
++ * infoframe carries the current metadata.
 + */
 +void dv_injection_process_frame(struct vframe_s *vf)
 +{
@@ -486,6 +565,17 @@ index 0000000..5e48208
 +		return;
 +	if (!dm_metadata_size)
 +		return;
++
++	if (dv_info_dump) {
++		dv_info_dump = 0;
++		dv_injection_dump_sink_info();
++	}
++
++	if (dv_injection_path == 1) {
++		if (dv_emp_dirty)
++			schedule_work(&dv_emp_work);
++		return;
++	}
 +
 +	if (dv_injection_write_canvas() < 0)
 +		return;
@@ -531,7 +621,13 @@ index 0000000..5e48208
 +		dv_injection_log(1, "dv injection: bad metadata (%d)\n", ret);
 +		return ret;
 +	}
-+	return dv_injection_form_packets(dm_metadata, dm_metadata_size);
++	ret = dv_injection_form_packets(dm_metadata, dm_metadata_size);
++	if (ret < 0)
++		return ret;
++
++	/* new metadata: the EMP infoframe has to be refreshed */
++	dv_emp_dirty = true;
++	return 0;
 +}
 +
 +static int dv_injection_param_get(char *buffer,
@@ -555,6 +651,7 @@ index 0000000..5e48208
 +
 +static int __init dv_injection_init(void)
 +{
++	INIT_WORK(&dv_emp_work, dv_emp_worker);
 +	dv_injection_log(1, "dv injection: module loaded\n");
 +	return 0;
 +}
