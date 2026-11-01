@@ -81,7 +81,7 @@ new file mode 100644
 index 0000000000..1111111111
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,624 @@
+@@ -0,0 +1,633 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -172,12 +172,13 @@ index 0000000000..1111111111
 +MODULE_PARM_DESC(dv_metadata_len,
 +		 "\n length of the DM metadata in bytes (0 = derive from hex)\n");
 +
-+static unsigned int osd_canvas;
++static unsigned int osd_canvas = 0xe1;
 +module_param(osd_canvas, uint, 0644);
 +MODULE_PARM_DESC(osd_canvas,
 +		 "\n canvas index the metadata is written to\n");
 +
-+static unsigned int osd_pixel_offset;
++/* one full frame in pixels: 3840x2160 for 4K, 1920x1080 for 1080p */
++static unsigned int osd_pixel_offset = 8294400;
 +module_param(osd_pixel_offset, uint, 0644);
 +MODULE_PARM_DESC(osd_pixel_offset,
 +		 "\n pixel offset inside the canvas where the metadata starts\n");
@@ -195,7 +196,7 @@ index 0000000000..1111111111
 +module_param(even_pattern, uint, 0644);
 +MODULE_PARM_DESC(even_pattern, "\n pixel pattern for a cleared bit\n");
 +
-+static unsigned int packet_repeat = DV_INJ_NUM_HDR_DM_PACKET_REPEATS;
++static unsigned int packet_repeat = 1;
 +module_param(packet_repeat, uint, 0644);
 +MODULE_PARM_DESC(packet_repeat, "\n how often every packet is repeated\n");
 +
@@ -437,9 +438,7 @@ index 0000000000..1111111111
 +	struct canvas_s cs;
 +	void *pixel_buffer;
 +	u8 pkt_num;
-+	u32 i;
-+	u32 start_offset = osd_pixel_offset;
-+	u32 pixels_per_pkt = DV_INJ_PIXELS_PER_PKT;
++	u32 i, page;
 +	u32 pkt_stride;
 +
 +	memset(&cs, 0, sizeof(cs));
@@ -454,27 +453,41 @@ index 0000000000..1111111111
 +	if (!pixel_buffer)
 +		return -ENOMEM;
 +
-+	pkt_stride = pixels_per_pkt * bytes_per_pixel;
++	pkt_stride = DV_INJ_PIXELS_PER_PKT * bytes_per_pixel;
 +
-+	for (pkt_num = 0; pkt_num < dm_packet.num_pkts; pkt_num++) {
-+		u8 *dst = (u8 *)pixel_buffer + start_offset * bytes_per_pixel +
-+			pkt_num * packet_repeat * pkt_stride;
++	/*
++	 * The OSD canvas is double buffered: page 0 starts at pixel 0 and
++	 * page 1 one full frame later (osd_pixel_offset).  Both pages have to
++	 * carry the metadata, otherwise only every other frame is valid for
++	 * the sink.  Every packet keeps room for
++	 * DV_INJ_NUM_HDR_DM_PACKET_REPEATS copies, as in the reference
++	 * implementation.
++	 */
++	for (page = 0; page < 2; page++) {
++		for (pkt_num = 0; pkt_num < dm_packet.num_pkts; pkt_num++) {
++			u32 pkt_start = page * osd_pixel_offset +
++				pkt_num * DV_INJ_NUM_HDR_DM_PACKET_REPEATS *
++				DV_INJ_PIXELS_PER_PKT;
++			u8 *dst = (u8 *)pixel_buffer +
++				pkt_start * bytes_per_pixel;
 +
-+		for (i = 0; i < packet_repeat; i++) {
-+			if (bytes_per_pixel == 4) {
-+				memcpy(dst + i * pkt_stride,
-+				       dm_packet.pixel_data[pkt_num],
-+				       pkt_stride);
-+			} else {
-+				u32 p;
++			for (i = 0; i < packet_repeat; i++) {
++				if (bytes_per_pixel == 4) {
++					memcpy(dst + i * pkt_stride,
++					       dm_packet.pixel_data[pkt_num],
++					       pkt_stride);
++				} else {
++					u32 px;
 +
-+				for (p = 0; p < pixels_per_pkt; p++) {
-+					u16 v = (u16)
-+						(dm_packet.pixel_data[pkt_num][p] &
-+						 0xffff);
++					for (px = 0; px < DV_INJ_PIXELS_PER_PKT;
++					     px++) {
++						u16 v = (u16)
++							(dm_packet.pixel_data[pkt_num][px] &
++							 0xffff);
 +
-+					memcpy(dst + i * pkt_stride + p * 2,
-+					       &v, 2);
++						memcpy(dst + i * pkt_stride + px * 2,
++						       &v, 2);
++					}
 +				}
 +			}
 +		}
@@ -485,10 +498,6 @@ index 0000000000..1111111111
 +	return 0;
 +}
 +
-+/*
-+ * Tell the TV that the incoming signal is Dolby Vision.  The VSIF is
-+ * built and sent by the existing HDMI TX code, no DV Core involved.
-+ */
 +static int dv_injection_send_vsif(void)
 +{
 +	const struct vinfo_s *vinfo = get_current_vinfo();

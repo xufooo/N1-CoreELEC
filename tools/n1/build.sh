@@ -65,6 +65,13 @@ elif [ "$target" = kernel ]; then
   # Fast validation of the kernel patch stack: build only the NG kernel
   # package (and its dependencies), not the whole image.
   ./scripts/build linux 2>&1 | tee output/build.log
+  # Publish the kernel image so it can be dropped straight onto
+  # /flash/kernel.img on the device instead of reflashing a full image.
+  kernel_img=$(ls -1t build.CoreELEC-Amlogic-ng.arm-21/build/.install_pkg/linux-*/.image/Image* 2>/dev/null | head -1 || true)
+  if [ -n "${kernel_img:-}" ]; then
+    cp "$kernel_img" output/kernel.img
+    (cd output && md5sum -t kernel.img > kernel.img.md5)
+  fi
 else
   make image 2>&1 | tee output/build.log
 fi
