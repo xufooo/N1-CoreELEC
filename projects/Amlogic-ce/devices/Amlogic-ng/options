@@ -142,10 +142,10 @@
   # Space separated list is supported,
   # e.g. ADDITIONAL_PACKAGES="PACKAGE1 PACKAGE2"
     ADDITIONAL_PACKAGES+=" tmate"
-  # Kodi 二进制插件：PVR（IPTV Simple + TVHeadend 客户端）
-  # 镜像本体不含这两个插件，Kodi 官方插件源也不提供对应分支的现成 zip，
+  # Kodi 二进制插件：PVR IPTV Simple（只此一个；TVHeadend 客户端已弃用，不编入）
+  # 镜像本体不含该插件，Kodi 官方插件源也不提供对应分支的现成 zip，
   # 只能随镜像编译安装；装好后在设备侧恢复 addon_data 里的源配置即可使用。
-    ADDITIONAL_PACKAGES+=" pvr.iptvsimple pvr.hts"
+    ADDITIONAL_PACKAGES+=" pvr.iptvsimple"
 
   # add OOTB support for IR remote
   # IR_REMOTE_KEYMAPS+=""
