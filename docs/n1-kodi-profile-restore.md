@@ -227,3 +227,58 @@ USB 口上，想"顺便拷文件"，结果旧系统把这张盘识别成自己�
 
 恢复方式只有一个：**重新 dd 镜像**（镜像里的 `SYSTEM`/`kernel` 是唯一一致的一组）。
 重刷会顺便覆盖 `/storage` 的开头，所以配置要用事先做好的备份包重新应用。
+
+## 11. 还原 PVR（IPTV Simple）
+
+### 11.1 插件从 CoreELEC 仓库装，不必自己编
+
+镜像自带 `repository.coreelec`，仓库索引里有对应版本，直接下 zip 解压即可：
+
+```sh
+# 索引： https://addons.coreelec.org/Amlogic-ng/<CE版本>/<arch>/addons.xml.gz
+curl -L -o /tmp/pvr.zip \
+  https://addons.coreelec.org/Amlogic-ng/21.3/arm/pvr.iptvsimple/pvr.iptvsimple-21.11.0.1.zip
+unzip -o /tmp/pvr.zip -d /storage/.kodi/addons/
+```
+
+（Kodi 官方源 `mirrors.kodi.tv` / `mirrors.xbmc.org` 的 omega、nexus 分支**没有**这个 zip，别去那儿找。）
+
+### 11.2 三个必须做的状态位
+
+只解压插件是不够的，实测缺一项就"有频道但放不了"或"一个频道都没有"：
+
+| 状态 | 位置 | 说明 |
+|---|---|---|
+| 插件启用 | `Addons33.db` 的 `installed.enabled` | 从 zip 装完是 `0`（禁用），需在 Kodi 停止时改成 `1`，或在 GUI 的插件页启用 |
+| PVR 管理器 | `guisettings.xml` 的 `pvrmanager.enabled` | 必须是 `true`（且**不能带** `default="true"`，否则被忽略） |
+| 源配置 | `addon_data/pvr.iptvsimple/settings.xml` | 从老系统拷这一份即可 |
+
+### 11.3 缓存必须清掉（最常见的坑）
+
+从老系统拷 `addon_data/pvr.iptvsimple/` 时，里面会带 `iptv.m3u.cache`、`xmltv.xml.cache`。
+**带着这两个文件，插件会拿旧格式缓存去解析，结果是 0 个频道**，日志只有一句
+`Could not validiate M3U after startup`，看不出病因。
+
+```sh
+rm -f /storage/.kodi/userdata/addon_data/pvr.iptvsimple/*.cache
+# 只保留 settings.xml，然后重启 Kodi 让它重新拉取
+```
+
+实测对比：带缓存 → 0 频道；清掉后 → 107 频道 / 954 条 EPG。
+
+### 11.4 别用并发探测把源打爆
+
+排查时如果反复用 `curl` 循环拉同一个/多个频道地址，会触发 IPTV 代理端的并发限制，
+之后 Kodi 请求会收到 **HTTP 500 / 503**，表现为
+`CCurlFile::Open ... Failed with code 500` → `CFileCache::Open ... failed to open`，
+看起来像 Kodi 的问题，其实是源端被压满。
+
+判据：**静置 1 分钟后再试，若立刻能播，就是并发/限流**，不是插件配置错。
+排查时用单次 `curl -m 5` 取一个样本即可，不要循环。
+
+### 11.5 验收
+
+- [ ] 频道列表有内容（本次 107 个 / 7 个分组）
+- [ ] EPG 有条目（本次 954 条）
+- [ ] 任选一个频道能出画面与声音
+- [ ] 切换频道不报错
