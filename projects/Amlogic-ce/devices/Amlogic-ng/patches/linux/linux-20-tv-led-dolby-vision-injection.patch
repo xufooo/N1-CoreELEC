@@ -81,7 +81,7 @@ new file mode 100644
 index 0000000000..1111111111
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,584 @@
+@@ -0,0 +1,624 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -114,6 +114,7 @@ index 0000000000..1111111111
 +#include <linux/module.h>
 +#include <linux/moduleparam.h>
 +#include <linux/workqueue.h>
++#include <linux/timer.h>
 +#include <linux/string.h>
 +#include <linux/io.h>
 +#include <linux/mm.h>
@@ -214,7 +215,23 @@ index 0000000000..1111111111
 +
 +/* Write 1 to dump the sink Dolby Vision capabilities to dmesg. */
 +static unsigned int dv_info_dump;
-+module_param(dv_info_dump, uint, 0644);
++static void dv_injection_dump_sink_info(void);
++
++static int dv_info_dump_set(const char *val, const struct kernel_param *kp)
++{
++	int ret = param_set_uint(val, kp);
++
++	if (ret == 0)
++		dv_injection_dump_sink_info();
++	return ret;
++}
++
++static const struct kernel_param_ops dv_info_dump_ops = {
++	.set = dv_info_dump_set,
++	.get = param_get_uint,
++};
++
++module_param_cb(dv_info_dump, &dv_info_dump_ops, &dv_info_dump, 0644);
 +MODULE_PARM_DESC(dv_info_dump,
 +		 "\n write 1 to dump the sink Dolby Vision capabilities\n");
 +
@@ -539,30 +556,24 @@ index 0000000000..1111111111
 +}
 +
 +static bool dv_emp_dirty = true;
-+static struct work_struct dv_emp_work;
++static struct work_struct dv_inj_work;
++static struct timer_list dv_inj_timer;
++static unsigned int dv_inj_ticks;
 +
 +/*
-+ * send_emp() takes the hdmitx locks, so it must not run inside the
-+ * frame callback; the workqueue also coalesces repeated requests.
++ * The metadata has to reach the sink continuously: the canvas pixels are
++ * reused by the OSD, and the EMP infoframe only stays latched while it is
++ * refreshed.  A frame callback looks like the natural place for that, but
++ * the video path does not call update_vframe_src_fmt() for ordinary
++ * playback -- only deinterlace and v4lvideo do, when SEI metadata is
++ * refreshed -- so the work is driven by a timer instead.  send_emp() takes
++ * the hdmitx locks, hence the workqueue.
 + */
-+static void dv_emp_worker(struct work_struct *work)
++#define DV_INJ_INTERVAL_MS	100
++
++static void dv_inj_work_fn(struct work_struct *work)
 +{
 +	if (!dv_injection_enable || !dm_metadata_size)
-+		return;
-+	dv_emp_dirty = false;
-+	dv_injection_send_emp();
-+}
-+
-+/*
-+ * Called from the video sink for every frame.  Either writes the
-+ * metadata into the canvas (top-pixel path) or makes sure the EMP
-+ * infoframe carries the current metadata.
-+ */
-+void dv_injection_process_frame(struct vframe_s *vf)
-+{
-+	if (!dv_injection_enable)
-+		return;
-+	if (!dm_metadata_size)
 +		return;
 +
 +	if (dv_info_dump) {
@@ -571,8 +582,11 @@ index 0000000000..1111111111
 +	}
 +
 +	if (dv_injection_path == 1) {
-+		if (dv_emp_dirty)
-+			schedule_work(&dv_emp_work);
++		/* on metadata change, plus a once-a-second keep-alive */
++		if (dv_emp_dirty || (dv_inj_ticks % 10) == 0) {
++			dv_emp_dirty = false;
++			dv_injection_send_emp();
++		}
 +		return;
 +	}
 +
@@ -581,6 +595,27 @@ index 0000000000..1111111111
 +
 +	if (always_send_vsif)
 +		dv_injection_send_vsif();
++}
++
++static void dv_inj_timer_fn(unsigned long data)
++{
++	dv_inj_ticks++;
++	schedule_work(&dv_inj_work);
++	mod_timer(&dv_inj_timer,
++		  jiffies + msecs_to_jiffies(DV_INJ_INTERVAL_MS));
++}
++
++/*
++ * Called from the video sink when a frame updates the source format.  The
++ * timer already drives the injection, so this only makes sure it runs.
++ */
++void dv_injection_process_frame(struct vframe_s *vf)
++{
++	if (!dv_injection_enable)
++		return;
++	if (!timer_pending(&dv_inj_timer))
++		mod_timer(&dv_inj_timer,
++			  jiffies + msecs_to_jiffies(DV_INJ_INTERVAL_MS));
 +}
 +
 +/*
@@ -650,13 +685,18 @@ index 0000000000..1111111111
 +
 +static int __init dv_injection_init(void)
 +{
-+	INIT_WORK(&dv_emp_work, dv_emp_worker);
++	INIT_WORK(&dv_inj_work, dv_inj_work_fn);
++	setup_timer(&dv_inj_timer, dv_inj_timer_fn, 0);
++	mod_timer(&dv_inj_timer,
++		  jiffies + msecs_to_jiffies(DV_INJ_INTERVAL_MS));
 +	dv_injection_log(1, "dv injection: module loaded\n");
 +	return 0;
 +}
 +
 +static void __exit dv_injection_exit(void)
 +{
++	del_timer_sync(&dv_inj_timer);
++	cancel_work_sync(&dv_inj_work);
 +	dv_injection_log(1, "dv injection: module unloaded\n");
 +}
 +

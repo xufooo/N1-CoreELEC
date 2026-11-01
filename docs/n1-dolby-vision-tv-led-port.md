@@ -72,7 +72,7 @@ N1（S905D / GXL）没有杜比授权的 DV Core，`dovi.ko` 也拿不到，因�
 | `packet_repeat` | `3` | 每个包重复次数 |
 | `always_send_vsif` | `1` | 每帧都发 VSIF |
 | `dv_injection_path` | `0` | 元数据走哪条路：`0`=canvas 顶部像素（需标定），`1`=原生 HDMI EMP infoframe |
-| `dv_info_dump` | `0` | 写 `1` 把电视的 DV 能力（OUI/ver/emp_cap/yuv422_12bit）打进 dmesg |
+| `dv_info_dump` | `0` | 写入任意值**立即**把电视的 DV 能力（OUI/ver/emp_cap/yuv422_12bit）打进 dmesg |
 | `dv_injection_log_level` | `0` | 日志级别 |
 
 ### 4.1 两条注入路径（canvas 与 EMP）
@@ -103,6 +103,34 @@ bit7:0 是首字节，之后逐字展开），所以本模块拿到的 DM 字节
   并且只在元数据更新后才重新发送，避免每帧重复下发。
 - 发送失败（返回 -1）时，配合 `dv_info_dump=1` 会把电视上报的 DV 能力打印出来，
   用于区分"电视不支持"与"参数没配对"。
+
+### 4.2 触发方式：定时器，不是帧回调
+
+注入元数据必须**持续**送达电视：canvas 顶部像素会被 OSD 重新覆盖，EMP infoframe 也需要保持刷新。
+直觉上应该挂在视频帧回调里，但实测证明**不行**：
+
+- 补丁原来把 `dv_injection_process_frame()` 放在 `update_vframe_src_fmt()` 里，
+- 而该函数只被 **deinterlace / v4lvideo** 在 SEI 元数据刷新时调用，
+- 普通文件播放（Amlogic 解码 → vpp → HDMI）根本不走它。
+
+2026-11-01 实测：`dv_injection_log_level=2`、`dv_injection_enable=1`、播放 DV 样片 12 秒（2160p24），
+dmesg 里只出现参数写入时的
+
+```
+dv injection: 235 bytes of DM metadata
+dv injection: formed 2 packets from 235 bytes
+```
+
+**没有任何**运行期日志，`send_emp()` 一次也没被调用——即"参数→分组"这一段是通的，**注入从未真正发生**。
+
+因此改为 **100 ms 定时器 + workqueue** 驱动：
+
+| 路径 | 每个 tick 的动作 |
+|---|---|
+| `dv_injection_path=1`（EMP） | 元数据变化时发一次，之后每秒发一次保持；worker 里调 `send_emp()`（会取 hdmitx 锁） |
+| `dv_injection_path=0`（canvas） | 重写 canvas 顶部像素 + 刷新 VSIF |
+
+`dv_injection_process_frame()` 仍然保留（`video.c` 的调用点不动），但它现在只负责"确保定时器在跑"。
 
 ## 5. 启用步骤（实机）
 
