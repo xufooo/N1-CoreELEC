@@ -46,12 +46,30 @@ head -12 /usr/share/kodi/system/keyboardlayouts/chinese.xml
 
 ## 3. 装中文语言包
 
-语言包不在 CoreELEC 镜像里，要从 Kodi 官方插件源取（Kodi 19 = `matrix` 分支）：
+语言包不在 CoreELEC 镜像里，要从 Kodi 官方插件源取。
+
+**分支必须与 Kodi 版本匹配，否则会静默失效**。语言包从 9.0.x 到 11.0.x 与主版本绑定：
+
+| Kodi | CoreELEC | 插件源分支 | 语言包版本 |
+|---|---|---|---|
+| 19 | 20.x | `matrix` | 9.0.x |
+| 21 | 21.x | `omega` | 11.0.x |
+
+取错版本的后果很隐蔽：Kodi 启动时**拒绝加载**该语言包、回退到 `en_gb`，
+并**把 `guisettings.xml` 里的 `locale.language` 改回 `en_gb`**——表现为"设置没生效"，
+而且下次再改也会被继续覆盖。判断方法：设置后重启 Kodi，若值又被改回 `en_gb`，就是语言包版本不对。
+
+正确版本应包含 `resources/strings.po`（本机 omega 分支的 11.0.104 约 581 KB）：
 
 ```sh
-# 目录: https://mirrors.xbmc.org/addons/matrix/resource.language.zh_cn/
+# Kodi 21（CoreELEC 21.x）
 curl -L -o zh_cn.zip \
-  https://mirrors.xbmc.org/addons/matrix/resource.language.zh_cn/resource.language.zh_cn-<ver>.zip
+  https://mirrors.xbmc.org/addons/omega/resource.language.zh_cn/resource.language.zh_cn-11.0.104.zip
+unzip -l zh_cn.zip   # 必须能看到 resource.language.zh_cn/resources/strings.po
+```
+
+
+```sh
 unzip -o zh_cn.zip -d /storage/.kodi/addons/     # → /storage/.kodi/addons/resource.language.zh_cn
 ```
 
