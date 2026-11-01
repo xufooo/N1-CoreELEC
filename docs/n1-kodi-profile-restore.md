@@ -77,26 +77,33 @@ systemctl start kodi
 
 ## 5. 还原媒体源（sources.xml）
 
-用老系统的 `Files.GetSources` 快照重写 `sources.xml`。**multipath 源要逐字照抄**（Kodi 存的是
-URL 编码后的多路径串，路径之间用 `/` 分隔）：
+用老系统的 `Files.GetSources` 快照重写 `sources.xml`。
+
+**关键坑：`Files.GetSources` 上报的是 Kodi 内部形式，不是 `sources.xml` 的存储形式。**
+
+- JSON-RPC 上报多路径源时会给出 `multipath://` + URL 编码串（例如
+  `multipath://smb%3a%2f%2fHOST%2fA%2f/smb%3a%2f%2fHOST%2fB%2f`）
+- 但 `sources.xml` 里真正存的是**一个源多个 `<path>` 元素**：
 
 ```xml
 <sources>
   <video>
     <default pathversion="1"/>
     <source>
-      <name>Some Videos</name>
-      <path pathversion="1">smb://HOST/Share/Movies/</path>
-      <allowsharing>true</allowsharing>
-    </source>
-    <source>
       <name>Combined</name>
-      <path pathversion="1">multipath://smb%3a%2f%2fHOST%2fA%2f/smb%3a%2f%2fHOST%2fB%2f</path>
+      <path pathversion="1">smb://HOST/Share/A/</path>
+      <path pathversion="1">smb://HOST/Share/B/</path>
       <allowsharing>true</allowsharing>
     </source>
   </video>
 </sources>
 ```
+
+如果把 `multipath://...` 串直接写进 `<path>`，Kodi 会把它当**一个字面路径**，全部源失效
+（表现为源还在列表里，但打开就报错/路径不对）。
+
+最稳的做法：**直接拿老系统 `/storage/.kodi/userdata/sources.xml` 原文件逐字覆盖**，
+不要用 JSON-RPC 快照重新拼。
 
 同样要停 Kodi 再写。
 
