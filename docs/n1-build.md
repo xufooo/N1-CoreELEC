@@ -49,16 +49,27 @@ not by edits to shared upstream sources.
 `CoreELEC-Amlogic-ng.arm-21.3-Omega.tar`（273,981,440 B，顶层目录
 `CoreELEC-Amalogic-ng.arm-21.3-Omega/`，**非本仓库产物**），已删除，`/storage/.update/` 现为空。
 
-**官方关闭入口（用户侧，已确认）**：
+**官方关闭入口（用户侧，已确认并实测）**：
 
 ```
-设置 → CoreELEC → Updates → Automatic Updates = OFF
+设置 → CoreELEC → Updates → Automatic Updates = MANUAL
 ```
 
-参考：CoreELEC Wiki `coreelec:ce_addon_updates`、`coreelec:updates`（Disable Auto-Update）。
-同一页还有 `Submit Statistics`、`Show Update Notifications` 可一并关闭。
+注意：官方的取值是 **`auto` / `manual`**，**没有 "disable" 选项**（此前按 ON/OFF 描述是错的）。
+同一页还可关闭 `Show Update Notifications`、`Submit Statistics`。
 
-实现机制（`service.coreelec.settings/defaults.py`）：
+实测落盘结果（设置成 manual 后）：
+
+```xml
+<!-- /storage/.kodi/userdata/addon_data/service.coreelec.settings/oe_settings.xml -->
+<updates>
+    <AutoUpdate>manual</AutoUpdate>
+    <UpdateNotify>0</UpdateNotify>
+    <SubmitStats>0</SubmitStats>
+</updates>
+```
+
+另有一个独立开关用于插件内部判据（`defaults.py`）：
 
 ```python
 updates = {
@@ -68,14 +79,13 @@ updates = {
 }
 ```
 
-即开关等价于 `/dev/.update_disabled` 是否存在；`/dev` 为内存盘，每条启动由设置插件按保存值重建。
+即 `/dev/.update_disabled` 存在时插件整体视为禁用；`/dev` 为内存盘，重启即失效。
+**两者不是同一个东西**：GUI 的 `AutoUpdate=manual` 控制是否自动检查/下载，
+`/dev/.update_disabled` 是插件的总开关判据。
 
-**待做的镜像级改动**（目标：刷机后默认即关闭，无需手动操作）：
-
-1. 在 `projects/Amlogic-ce/packages/addons/` 下加项目级覆盖包，对 `service.coreelec.settings`
-   的 `defaults.py` 打补丁，把 `ENABLED` 默认置为 False；或
-2. 随 SYSTEM 预置一个 oneshot 服务，在 Kodi 启动前创建 `/dev/.update_disabled`；
-3. 重新走 CI 的 `image` 目标出镜像。
+**待做的镜像级改动**（目标：刷机后默认即 manual，无需手动操作）：
+在镜像里预置上述 `oe_settings.xml`（或改 `service.coreelec.settings` 的默认值），
+使刷机后 `<AutoUpdate>` 直接为 `manual`；随后走 CI 的 `image` 目标重出镜像。
 
 **验收标准**：
 
