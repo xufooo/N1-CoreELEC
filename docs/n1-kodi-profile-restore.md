@@ -140,3 +140,25 @@ smbclient -L //NAS名 -N        # 能 "Anonymous login successful" 就说明名�
 - [ ] 视频源列表与老系统一致（含 multipath 源）
 - [ ] 媒体库扫描能跑通、无凭据弹窗卡死
 - [ ] 蓝牙遥控器可操作菜单
+
+## 10. 严重坑：不要把新镜像的 U 盘插到正在运行的 CoreELEC 上
+
+实测事故（2026-11-01）：把刚写好的新版 U 盘插到**另一套正在运行的 CoreELEC**（旧版本）的第二个
+USB 口上，想"顺便拷文件"，结果旧系统把这张盘识别成自己的可写 COREELEC 分区，执行了首启/扩容
+逻辑，**用旧系统的 `SYSTEM` 和 `kernel.img` 覆盖了新盘的启动文件**，还写了 `dtb.xml`、
+`fs-resize.log`、`resolution.ini`。之后这张盘变成"新 `boot.ini` + 旧 `SYSTEM`/`kernel`"的
+混合体，**完全无法启动**。
+
+判据（在能读 FAT 的机器上比对）：
+
+| 文件 | 正常应匹配 | 被覆盖后 |
+|---|---|---|
+| `SYSTEM` | 与 `SYSTEM.md5` 一致 | 大小/时间戳/md5 全部不符 |
+| `kernel.img` | 与 `kernel.img.md5` 一致 | 同上 |
+| 附带文件 | 无 | 多出 `dtb.xml`、`fs-resize.log`、`resolution.ini` |
+
+**结论**：要在两套系统之间搬文件，一律走电脑中转（scp / 读卡器），
+**不要**把待刷的盘插到任何正在运行的 CoreELEC 上。
+
+恢复方式只有一个：**重新 dd 镜像**（镜像里的 `SYSTEM`/`kernel` 是唯一一致的一组）。
+重刷会顺便覆盖 `/storage` 的开头，所以配置要用事先做好的备份包重新应用。
