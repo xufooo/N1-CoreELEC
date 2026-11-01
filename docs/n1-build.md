@@ -128,14 +128,16 @@ BUILD_ID="<提交号>"
 | `usr/lib/systemd/system/n1-provision.service` | oneshot，`Before=kodi.service`、`WantedBy=kodi.target`，`scripts/image` 会自动 enable |
 | `usr/share/n1-provision/resource.language.zh_cn-11.0.104.zip` | 中文语言包（omega 分支，对应 Kodi 21） |
 
-做三件事：
+做两件事：
 
-1. 把语言包解压到 `/storage/.kodi/addons/`，使刷机后**中文立即可用**
+1. 把语言包解压到 `/storage/.kodi/addons/`，使刷机后**中文可在界面里直接选**
 2. 在 `/storage/.kodi/userdata/addon_data/service.coreelec.settings/oe_settings.xml`
    里写入 `<updates><AutoUpdate>manual</AutoUpdate>`，**刷机后默认不自动升级**
    （自编镜像一旦被官方升级覆盖，杜比视界补丁的 SYSTEM/kernel 就没了）
-3. 若 `guisettings.xml` 不存在（全新安装），写一份只含 `locale.language=resource.language.zh_cn`
-   的最小设置，Kodi 首次启动即为中文
+
+**不设默认语言、不改字体。** 早期版本会顺手把 `guisettings.xml` 的 `locale.language`
+写成 `resource.language.zh_cn`，结果默认皮肤字体（Arial）没有 CJK 字形，
+整个界面渲染成方块，用户还得自己救回来——所以这段已删除，语言由用户在 GUI 里决定。
 
 **幂等与边界**：脚本以 `/storage/.n1-provisioned` 作为完成标记，存在即直接退出；
 `guisettings.xml` / `oe_settings.xml` **已存在时一律不改**，避免覆盖用户自己的配置。

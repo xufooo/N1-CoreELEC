@@ -6,7 +6,11 @@
 #   1. installs the bundled Chinese language pack
 #   2. defaults CoreELEC to manual updates (the custom build must not be
 #      replaced by an upstream release)
-#   3. preselects Chinese when Kodi has no settings of its own yet
+#
+# The language pack is only made available: the UI language, region and font
+# stay at the image defaults, and the user picks Chinese in the GUI if wanted.
+# Preselecting it here used to leave the skin without CJK glyphs, so the whole
+# interface rendered as empty boxes.
 #
 # Nothing is touched if /storage/.n1-provisioned already exists, so user
 # settings survive later boots and image upgrades.
@@ -46,17 +50,6 @@ if [ ! -f "$SETTINGS" ]; then
 		</updates>
 	</settings>
 </coreelec>
-XML
-fi
-
-# 3) Kodi has no settings yet -> start in Chinese.  When a settings file
-#    exists this is a user's own configuration and is left alone.
-GUI="$USERDATA/guisettings.xml"
-if [ ! -f "$GUI" ]; then
-	cat > "$GUI" <<'XML'
-<settings version="2">
-    <setting id="locale.language">resource.language.zh_cn</setting>
-</settings>
 XML
 fi
 
