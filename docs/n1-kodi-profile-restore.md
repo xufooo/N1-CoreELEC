@@ -93,6 +93,53 @@ systemctl start kodi
 
 校验：重启后文件里仍是这些值 = Kodi 认了。
 
+### 4.1 手工编辑 guisettings.xml 的两个致命细节
+
+**细节一：不要保留 `default="true"` 属性。**
+
+用 sed 只替换标签内的文字、把开始标签原样保留时，会出现：
+
+```xml
+<!-- 错：Kodi 认为"值等于默认值"，忽略文本，按默认处理 -->
+<setting id="locale.timezone" default="true">zoneinfo/Asia/Shanghai</setting>
+
+<!-- 对：没有该属性才被视为用户设置 -->
+<setting id="locale.timezone">zoneinfo/Asia/Shanghai</setting>
+```
+
+Kodi 自己写入用户值时也会丢掉这个属性；保留它等于白改。
+判据同上：重启 Kodi 后值是否仍在（被重置 = 没生效）。
+
+**细节二：时区值必须带 `zoneinfo/` 前缀。**
+
+```xml
+<setting id="locale.timezone">zoneinfo/Asia/Shanghai</setting>   <!-- 对 -->
+<setting id="locale.timezone">Asia/Shanghai</setting>            <!-- 错，会被重置为 UTC -->
+```
+
+`locale.country` 则用**语言包 `langinfo.xml` 里声明的名字**（中文包是 `Beijing (12h)` / `Beijing (24h)`，
+不是 `China`）；语言没生效时这个名字也不在可选列表里，会被重置。
+
+### 4.2 系统时钟（与 Kodi 界面时区是两件事）
+
+Kodi 的 `locale.timezone` 只影响界面显示。**系统时区**由 `tz-data.service` 设置：
+
+```ini
+# /usr/lib/systemd/system/tz-data.service
+Environment=TIMEZONE=UTC
+EnvironmentFile=-/storage/.cache/timezone
+ExecStart=/bin/ln -sf /usr/share/zoneinfo/${TIMEZONE} /var/run/localtime
+```
+
+即官方持久化位置是 **`/storage/.cache/timezone`**（CoreELEC 设置里选时区时写的就是它）：
+
+```sh
+printf 'TIMEZONE=Asia/Shanghai\n' > /storage/.cache/timezone
+systemctl restart tz-data.service
+date                      # 应显示 CST
+ls -l /var/run/localtime  # 应指向 /usr/share/zoneinfo/Asia/Shanghai
+```
+
 ## 5. 还原媒体源（sources.xml）
 
 用老系统的 `Files.GetSources` 快照重写 `sources.xml`。
