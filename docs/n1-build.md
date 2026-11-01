@@ -93,3 +93,27 @@ updates = {
 - [ ] 启动后 `/storage/.update/` 保持为空（不出现官方 tar）
 - [ ] Kodi 设置页仍可手动改回（不阻断手动升级路径）
 - [ ] `/etc/os-release` 仍为自编标识（`VERSION="21.3-Omega-N1-r1"`）
+
+## 版本串与构建者标识（约定）
+
+`tools/n1/build.sh` 里设置构建者标签，CoreELEC 的 `scripts/image` 会把它拼进系统版本串：
+
+```sh
+export CUSTOM_VERSION=21.3-Omega-N1-r1
+export BUILDER_NAME=N1          # 见下方约定
+export BUILDER_VERSION="$(git rev-parse --short=12 HEAD)"
+```
+
+生成结果（`/etc/os-release`，Kodi「CoreELEC → 关于」同步可见）：
+
+```
+PRETTY_NAME="CoreELEC (N1): 21.3-Omega-N1-r1"
+BUILDER_NAME="N1"
+COREELEC_BUILD="N1"
+BUILD_ID="<提交号>"
+```
+
+**约定：`BUILDER_NAME` 必须是中性项目标识（当前为 `N1`），禁止写入个人账号名或个人昵称。**
+`scripts/image:93` 的规则是：值为 `official` 时括号段整段省略（得到 `CoreELEC: 21.3-...`），
+即该字段完全由构建脚本控制，改一次即全镜像生效，需重新构建。
+`BUILDER_VERSION`（构建提交号）用于对应具体构建，应保留。

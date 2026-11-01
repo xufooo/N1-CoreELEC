@@ -13,7 +13,7 @@ export PROJECT=Amlogic-ce DEVICE=Amlogic-ng ARCH=arm N1_BUILD=yes
 export CCACHE_DIR="$PWD/.ccache" AUTOREMOVE=yes
 export THREADCOUNT=2 CONCURRENCY_MAKE_LEVEL=4 CONCURRENCY_LOAD=6
 export CUSTOM_VERSION=21.3-Omega-N1-r1
-export BUILDER_NAME=xufooo BUILDER_VERSION="$(git rev-parse --short=12 HEAD)"
+export BUILDER_NAME=N1 BUILDER_VERSION="$(git rev-parse --short=12 HEAD)"
 mkdir -p output .coreelec
 printf '%s\n' 'CCACHE_CACHE_SIZE="2G"' > .coreelec/options
 
