@@ -1,0 +1,13 @@
+[Unit]
+Description=N1 image first-boot provisioning
+After=graphical.target
+Before=kodi.service
+ConditionPathExists=!/storage/.n1-provisioned
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/n1-provision.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=kodi.target

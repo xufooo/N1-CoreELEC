@@ -117,3 +117,34 @@ BUILD_ID="<提交号>"
 `scripts/image:93` 的规则是：值为 `official` 时括号段整段省略（得到 `CoreELEC: 21.3-...`），
 即该字段完全由构建脚本控制，改一次即全镜像生效，需重新构建。
 `BUILDER_VERSION`（构建提交号）用于对应具体构建，应保留。
+
+## 首次开机预置（n1-provision）
+
+镜像内置一个首次开机脚本，只在**全新安装**时跑一次，之后不再干预用户设置：
+
+| 文件（在 `projects/Amlogic-ce/devices/Amlogic-ng/filesystem/` 下） | 作用 |
+|---|---|
+| `usr/lib/n1-provision.sh` | 执行预置逻辑 |
+| `usr/lib/systemd/system/n1-provision.service` | oneshot，`Before=kodi.service`、`WantedBy=kodi.target`，`scripts/image` 会自动 enable |
+| `usr/share/n1-provision/resource.language.zh_cn-11.0.104.zip` | 中文语言包（omega 分支，对应 Kodi 21） |
+
+做三件事：
+
+1. 把语言包解压到 `/storage/.kodi/addons/`，使刷机后**中文立即可用**
+2. 在 `/storage/.kodi/userdata/addon_data/service.coreelec.settings/oe_settings.xml`
+   里写入 `<updates><AutoUpdate>manual</AutoUpdate>`，**刷机后默认不自动升级**
+   （自编镜像一旦被官方升级覆盖，杜比视界补丁的 SYSTEM/kernel 就没了）
+3. 若 `guisettings.xml` 不存在（全新安装），写一份只含 `locale.language=resource.language.zh_cn`
+   的最小设置，Kodi 首次启动即为中文
+
+**幂等与边界**：脚本以 `/storage/.n1-provisioned` 作为完成标记，存在即直接退出；
+`guisettings.xml` / `oe_settings.xml` **已存在时一律不改**，避免覆盖用户自己的配置。
+
+刷机后核对：
+
+```sh
+ls /storage/.n1-provisioned                                   # 标记存在
+ls -d /storage/.kodi/addons/resource.language.zh_cn           # 语言包在
+grep -A2 "<updates>" /storage/.kodi/userdata/addon_data/service.coreelec.settings/oe_settings.xml
+# 期望 AutoUpdate=manual
+```
