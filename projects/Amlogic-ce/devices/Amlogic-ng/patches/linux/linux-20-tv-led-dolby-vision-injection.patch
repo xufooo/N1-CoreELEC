@@ -15,89 +15,6 @@ index bc9ac74..95845cf 100644
 +		return;
 +#endif
 +
-diff --git a/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c b/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c
---- a/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c
-+++ b/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c
-@@ -27,6 +27,9 @@
- #include "arch/vpp_hdr_regs.h"
- #include "arch/vpp_regs.h"
- #include "arch/vpp_dolbyvision_regs.h"
-+#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+#include <linux/amlogic/media/video_sink/dv_injection.h>
-+#endif
- #include "reg_helper.h"
- #include "hdr/gamut_convert.h"
- #include "hdr/am_cuva_hdr_tm.h"
-@@ -2287,7 +2290,69 @@
- 
- 	memset(&hdr_mtx_param, 0, sizeof(struct hdr_proc_mtx_param_s));
- 	memset(&hdr_lut_param, 0, sizeof(struct hdr_proc_lut_param_s));
-+
-+#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+	/* TV-led Dolby Vision (profile 5) needs the device side reshaping:
-+	 * EOTF/OOTF/OETF tables plus gamut matrices and chroma gain, programmed
-+	 * in the same order the vendor HDR2 implementation uses.
-+	 */
-+	if (module_sel == VD1_HDR && dv_injection_need_reshaping() &&
-+	    !is_hdr_tvmode()) {
-+		/* TV-led Dolby Vision is reshaped by the sink; the device must
-+		 * leave the pixels alone in that mode.  This branch therefore
-+		 * only runs for player-led (LLDV), which is the case the vendor
-+		 * build handles with the same sequence.
-+		 */
-+		for (i = 0; i < HDR2_EOTF_LUT_SIZE; i++)
-+			hdr_lut_param.eotf_lut[i] = eo_y_lut_pq[i];
-+		for (i = 0; i < HDR2_OETF_LUT_SIZE; i++) {
-+			hdr_lut_param.oetf_lut[i] = oe_y_lut_hdr[i];
-+			hdr_lut_param.ogain_lut[i] = oo_y_lut_hdr_sdr[i];
-+		}
-+		for (i = 0; i < HDR2_CGAIN_LUT_SIZE; i++)
-+			hdr_lut_param.cgain_lut[i] = cgain_lut1[i];
-+		hdr_lut_param.bitdepth = 10;
-+		hdr_lut_param.lut_on = LUT_ON;
-+		hdr_lut_param.cgain_en = LUT_ON;
-+		hdr_lut_param.hist_en = LUT_OFF;
- 
-+		/* hdr_mtx_param was just zeroed.  A zero 3x3 blacks the whole
-+		 * picture, so seed it with the same bypass values the bypass
-+		 * branch uses until the DV gamut coefficients are derived from
-+		 * the metadata.
-+		 */
-+		hdr_mtx_param.mtx_gamut_mode = 1;
-+		hdr_mtx_param.mtx_on = MTX_ON;
-+		for (i = 0; i < MTX_NUM_PARAM; i++) {
-+			hdr_mtx_param.mtx_in[i] = bypass_coeff[i];
-+			hdr_mtx_param.mtx_cgain[i] = bypass_coeff[i];
-+			hdr_mtx_param.mtx_ogain[i] = bypass_coeff[i];
-+			hdr_mtx_param.mtx_out[i] = bypass_coeff[i];
-+			if (i < 9)
-+				hdr_mtx_param.mtx_gamut[i] = gamut_bypass[i];
-+			if (i < 3) {
-+				hdr_mtx_param.mtxi_pre_offset[i] = bypass_pre[i];
-+				hdr_mtx_param.mtxi_pos_offset[i] = bypass_pos[i];
-+				hdr_mtx_param.mtxo_pre_offset[i] = bypass_pre[i];
-+				hdr_mtx_param.mtxo_pos_offset[i] = bypass_pos[i];
-+			}
-+		}
-+
-+		set_hdr_matrix(module_sel, HDR_IN_MTX, &hdr_mtx_param, NULL);
-+		set_eotf_lut(module_sel, &hdr_lut_param);
-+		set_hdr_matrix(module_sel, HDR_GAMUT_MTX, &hdr_mtx_param, NULL);
-+		set_ootf_lut(module_sel, &hdr_lut_param);
-+		set_oetf_lut(module_sel, &hdr_lut_param);
-+		set_hdr_matrix(module_sel, HDR_OUT_MTX, &hdr_mtx_param, NULL);
-+		set_c_gain(module_sel, &hdr_lut_param);
-+		set_ootf_lut(module_sel, &hdr_lut_param);
-+		set_oetf_lut(module_sel, &hdr_lut_param);
-+		set_c_gain(module_sel, &hdr_lut_param);
-+		hdr_hist_config(module_sel, &hdr_lut_param);
-+		return hdr_process_select;
-+	}
-+#endif
-+
- 	if ((module_sel == OSD1_HDR) &&
- 	    (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A))) {
- 		/* turn off OSD mtx and use HDR for g12, sm1, tl1 */
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
 index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
@@ -136,10 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..9999999999
+index 0000000000..aaaa0aaa0aa0
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1386 @@
+@@ -0,0 +1,1375 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -1394,17 +1311,6 @@ index 0000000000..9999999999
 +
 +
 +/*
-+ * The P5 (profile 5) reshaping needs the HDR2 pipeline to be programmed while
-+ * a Dolby Vision frame is actually being injected.  The HDR module asks this
-+ * instead of guessing from its own state.
-+ */
-+bool dv_injection_need_reshaping(void)
-+{
-+	return READ_ONCE(dv_injection_enable) && READ_ONCE(dv_injection_active);
-+}
-+EXPORT_SYMBOL(dv_injection_need_reshaping);
-+
-+/*
 + * While injection is active the Dolby VSIF has to stay on the wire.  A
 + * profile 7 stream carries an HDR10 base layer, and the video path keeps
 + * re-sending that DRM packet roughly every 100 ms, which wins the race
@@ -1571,10 +1477,10 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  EXPORT_SYMBOL(update_vframe_src_fmt);
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..9999999999
+index 0000000000..bbbb0bbb0bb0
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,24 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -1593,7 +1499,6 @@ index 0000000000..9999999999
 + */
 +void dv_injection_process_frame(struct vframe_s *vf);
 +bool dv_injection_render_frame(struct vframe_s *vf);
-+bool dv_injection_need_reshaping(void);
 +bool dv_injection_block_hdr10(void);
 +
 +/* hand over the raw DM metadata bytes (user space / Kodi) */
