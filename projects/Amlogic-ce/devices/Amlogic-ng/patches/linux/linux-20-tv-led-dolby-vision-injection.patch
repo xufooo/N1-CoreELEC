@@ -53,10 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..cccc0ccc0cc0
+index 0000000000..dddd0ddd0dd0
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1757 @@
+@@ -0,0 +1,1763 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -268,6 +268,12 @@ index 0000000000..cccc0ccc0cc0
 +	do { \
 +		if ((level) <= dv_injection_log_level) \
 +			pr_info(x); \
++	} while (0)
++
++#define dv_injection_log_cont(level, x...) \
++	do { \
++		if ((level) <= dv_injection_log_level) \
++			pr_cont(x); \
 +	} while (0)
 +
 +static u8 dm_metadata[DV_INJ_MAX_METADATA_SIZE];
