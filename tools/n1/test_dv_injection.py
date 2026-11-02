@@ -76,6 +76,7 @@ static struct dv_inj_slot dv_inj_static_slot;
 struct vframe_s { unsigned index; struct { int fmt; } src_fmt; };
 static unsigned int vdr_dm_data_source;
 static bool force_block_other_vsif_for_DV, auto_block_other_vsif_for_DV = true;
+static bool strict_dm_format = true;
 static u32 dv_inj_generation = 1;
 struct dv_inj_runtime { bool ready; void *base; u32 page_bytes; u32 pages; };
 static struct dv_inj_runtime dv_inj_rt;

@@ -79,10 +79,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..1111111111
+index 0000000000..3333333333
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1972 @@
+@@ -0,0 +1,1984 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -436,6 +436,13 @@ index 0000000000..1111111111
 +MODULE_PARM_DESC(packet_repeat, "\n how often every packet is repeated\n");
 +
 +static bool always_send_vsif = true;
++/* The reference packetizer does not require 12 bit 4:2:2.  Keep the
++ * strict check by default, but allow matching the author's wider
++ * input coverage when a stream is rejected here.
++ */
++static bool strict_dm_format = true;
++module_param(strict_dm_format, bool, 0644);
++MODULE_PARM_DESC(strict_dm_format, "\n require 12 bit 4:2:2 DM signalling\n");
 +module_param(always_send_vsif, bool, 0644);
 +MODULE_PARM_DESC(always_send_vsif, "\n send the Dolby VSIF on every frame\n");
 +
@@ -531,7 +538,8 @@ index 0000000000..1111111111
 +
 +	if (!data || size < 71 || size > DV_INJ_MAX_METADATA_SIZE)
 +		return -EINVAL;
-+	if (data[60] != 12 || data[61] > 2 || data[62] != 1 || data[63] > 1)
++	if (strict_dm_format &&
++	    (data[60] != 12 || data[61] > 2 || data[62] != 1 || data[63] > 1))
 +		return -EINVAL;
 +	for (i = 0; i < data[70]; i++) {
 +		if (size - offset < 5)
@@ -1042,7 +1050,11 @@ index 0000000000..1111111111
 +/* ---- L1/L5 metadata layer, ported from the reference implementation ---- */
 +static int L5_adjust_mode = 3; /* negative disables L5 handling */
 +static bool L1_adjust = true;  /* author's L1 handling switch */ /* 0 removed, 1 original, 2 metadata, 3 auto */
-+module_param(L5_adjust_mode, uint, 0644);
++module_param(L5_adjust_mode, int, 0644);
++module_param(L1_adjust, bool, 0644);
++MODULE_PARM_DESC(L1_adjust, "\n adjust Level 1 luminance\n");
++module_param(osd_L5_timeout_ms, uint, 0644);
++MODULE_PARM_DESC(osd_L5_timeout_ms, "\n quiet window after OSD ioctls\n");
 +MODULE_PARM_DESC(L5_adjust_mode, "\n Level 5 active area handling mode\n");
 +
 +typedef struct {
