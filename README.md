@@ -6,6 +6,7 @@ device boot/playback and Dolby Vision have not been verified.
 - [Build and artifacts](docs/n1-build.md)
 - [Community sources and patch decisions](docs/n1-sources.md)
 - [Detailed patch review (Chinese)](docs/n1-patch-review.md)
+- [DV reference-chain review and current limits (Chinese)](docs/n1-dv-reference-review-2026-11-02.md)
 - [Device and playback acceptance](docs/n1-acceptance.md)
 
 Use a spare USB stick.
@@ -13,8 +14,11 @@ Use a spare USB stick.
 The baseline ships one experimental DV patch, kept as a separate, individually
 identifiable file: `linux-20-tv-led-dolby-vision-injection.patch`. It adds a
 TV-led Dolby Vision metadata injection module (compiled in, inert until
-`dv_injection_enable` is set). No device boot or Dolby Vision playback has been
-verified; see [docs/n1-dolby-vision-tv-led-port.md](docs/n1-dolby-vision-tv-led-port.md).
+`dv_injection_enable` is set). It accepts manually supplied HDMI DM bytes;
+automatic frame metadata and P5 pixel reshaping are not implemented. Correct
+Dolby Vision playback has not been verified. See the
+[reference-chain review](docs/n1-dv-reference-review-2026-11-02.md) before using
+the historical experiment notes.
 
 # CoreELEC upstream
 

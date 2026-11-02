@@ -6,6 +6,7 @@ case "${1:-image}" in
   kernel) target=kernel;;
   *) echo 'Use image, toolchain or kernel' >&2; exit 2;;
 esac
+export N1_REQUESTED_TARGET="$target"
 test "$(uname -s)" = Linux || { echo 'Build requires a Linux host.' >&2; exit 1; }
 test "$(id -u)" != 0 || { echo 'Do not build as root.' >&2; exit 1; }
 
@@ -17,6 +18,9 @@ export BUILDER_NAME=N1 BUILDER_VERSION="$(git rev-parse --short=12 HEAD)"
 mkdir -p output .coreelec
 printf '%s\n' 'CCACHE_CACHE_SIZE="2G"' > .coreelec/options
 
+# Run the bounded host regressions before spending time on cross compilation.
+python3 -m unittest discover -s tools/n1 -p 'test_*.py' -v 2>&1 | tee output/preflight-tests.log
+
 python3 - <<'PY'
 import json, os, pathlib, subprocess
 commit = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()
@@ -27,10 +31,14 @@ manifest = {
     'kernel_commit': '50c8e8154c5aba3c7cd8438d04dd5fdd51733e41',
     'kodi_commit': 'acc0fc66bc6af69c31a93c5d17e36900343263b7',
     'project': 'Amlogic-ce', 'device': 'Amlogic-ng', 'board': 'Phicomm_N1',
-    'variant': 'baseline', 'dolby_vision_patches': True,
-    'kernel_compiled': os.environ.get('BUILD_TARGET') in ('kernel', 'image'),
+    'variant': 'baseline-with-default-off-dv-experiment', 'dolby_vision_patches': True,
+    'build_target': os.environ['N1_REQUESTED_TARGET'],
+    'build_status': 'running', 'kernel_compiled': False,
     'dolby_vision_patch_stack': ['linux-20-tv-led-dolby-vision-injection.patch'],
-    'dolby_vision_variant': 'tv-led', 'dolby_vision_device_tested': False,
+    'dolby_vision_variant': 'manual-hdmi-dm-injection-experiment',
+    'dolby_vision_p5_reshaping': False,
+    'dolby_vision_automatic_frame_metadata': False,
+    'dolby_vision_device_tested': False,
     'device_boot_tested': False, 'playback_tested': False,
 }
 pathlib.Path('output/source-manifest.json').write_text(json.dumps(manifest, indent=2)+'\n')
@@ -52,6 +60,15 @@ finish() {
   kill "$monitor_pid" 2>/dev/null || true
   wait "$monitor_pid" 2>/dev/null || true
   printf 'exit_code=%s\nelapsed_seconds=%s\n' "$result" "$(( $(date +%s) - start ))" > output/result.txt
+  N1_BUILD_RESULT="$result" python3 - <<'PY'
+import json, os, pathlib
+path = pathlib.Path('output/source-manifest.json')
+manifest = json.loads(path.read_text())
+passed = os.environ['N1_BUILD_RESULT'] == '0'
+manifest['build_status'] = 'success' if passed else 'failed'
+manifest['kernel_compiled'] = passed and manifest['build_target'] in ('kernel', 'image')
+path.write_text(json.dumps(manifest, indent=2) + '\n')
+PY
   # Preserve the detailed package errors without archiving source/object trees.
   if [ -d build.CoreELEC-Amlogic-ng.arm-21/.threads ]; then
     tar -czf output/package-logs.tar.gz -C build.CoreELEC-Amlogic-ng.arm-21 .threads
@@ -75,7 +92,8 @@ elif [ "$target" = kernel ]; then
     cp "$kernel_img" output/kernel.img
     (cd output && md5sum -t kernel.img > kernel.img.md5)
   else
-    echo "WARNING: kernel image not found, nothing to publish" | tee -a output/build.log
+    echo "ERROR: kernel build produced no publishable Image" | tee -a output/build.log
+    exit 1
   fi
 else
   make image 2>&1 | tee output/build.log

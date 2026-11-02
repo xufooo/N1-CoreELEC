@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 mkdir -p output sources/n1-audit .work/n1-audit
 exec > >(tee output/audit.log) 2>&1
-python3 tools/n1/test_packages.py -v
+python3 -m unittest discover -s tools/n1 -p 'test_*.py' -v
 kernel_sha=50c8e8154c5aba3c7cd8438d04dd5fdd51733e41
 archive="$PWD/sources/n1-audit/linux-${kernel_sha}.tar.gz"
 if [ ! -f "$archive" ]; then

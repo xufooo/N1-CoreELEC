@@ -1,19 +1,37 @@
+diff --git a/drivers/amlogic/media/enhancement/amvecm/amcsc.c b/drivers/amlogic/media/enhancement/amvecm/amcsc.c
+index bc9ac74..95845cf 100644
+--- a/drivers/amlogic/media/enhancement/amvecm/amcsc.c
++++ b/drivers/amlogic/media/enhancement/amvecm/amcsc.c
+@@ -45,0 +46,3 @@
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++#include <linux/amlogic/media/video_sink/dv_injection.h>
++#endif
+@@ -7325,0 +7329,8 @@ static void hdr_tx_pkt_cb(
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* GXL's producer emits DRM and HDR10+ packets from this function.
++	 * Leave the low-level HDMI callbacks free for explicit teardown.
++	 */
++	if (dv_injection_block_hdr10())
++		return;
++#endif
++
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
-index 68c8f4b..375e8bd 100644
+index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
 +++ b/drivers/amlogic/media/video_sink/Kconfig
-@@ -29,4 +29,15 @@ config AMLOGIC_MEDIA_VIDEOCAPTURE
+@@ -29,4 +29,16 @@ config AMLOGIC_MEDIA_VIDEOCAPTURE
      help
  		Internal Video Capture driver
  
 +config AMLOGIC_MEDIA_VIDEO_DV_INJECTION
 +    bool "TV-led Dolby Vision metadata injection"
 +    default y
-+    depends on AMLOGIC_MEDIA_VIDEO
++    depends on AMLOGIC_MEDIA_VIDEO && FB
 +    help
 +		Embed the Dolby Vision Display Management metadata into the
 +		top pixels of the OSD canvas and announce Dolby Vision with a
-+		VSIF packet, so that the TV performs the reshaping itself.
++		VSIF packet for display management. Source pixel reshaping
++		and automatic per-frame metadata are not implemented here.
 +		This works on SoCs without a licensed Dolby Vision core.
 +		The feature stays off until "dv_injection_enable" is set.
 +
@@ -35,10 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..1111111111
+index 0000000..0073122
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,646 @@
+@@ -0,0 +1,736 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -52,11 +70,11 @@ index 0000000000..1111111111
 + *   "Dolby Vision metadata packets", every bit of a packet is turned
 + *   into one picture pixel, and those pixels are written into the top
 + *   rows of the OSD/GUI canvas.  Together with a Dolby VSIF packet the
-+ *   TV knows that the incoming signal carries Dolby Vision metadata
-+ *   and performs the reshaping itself.
++ *   TV performs display management. Source pixel reshaping (notably
++ *   Profile 5) is a separate operation, not implemented by this module.
 + *
-+ *   This needs neither the Dolby licensed "DV Core" hardware nor the
-+ *   dovi.ko blob, so it works on SoCs without Dolby licensing (GXL).
++ *   This is a disabled-by-default static-DM transport diagnostic. It
++ *   is not a complete Profile 5 decoder or a per-frame metadata pipeline.
 + *
 + * Metadata source:
 + *   The DM metadata bytes are handed over from user space (Kodi) via
@@ -77,6 +95,9 @@ index 0000000000..1111111111
 +#include <linux/mm.h>
 +#include <linux/ctype.h>
 +#include <linux/slab.h>
++#include <linux/fb.h>
++#include <linux/console.h>
++#include <linux/mutex.h>
 +
 +#include <linux/amlogic/media/vfm/vframe.h>
 +#include <linux/amlogic/media/vout/vinfo.h>
@@ -115,7 +136,14 @@ index 0000000000..1111111111
 +};
 +
 +static bool dv_injection_enable;
-+module_param(dv_injection_enable, bool, 0644);
++static bool dv_injection_active;
++static DEFINE_MUTEX(dv_injection_lock);
++static int dv_injection_enable_set(const char *val, const struct kernel_param *kp);
++static const struct kernel_param_ops dv_enable_ops = {
++	.set = dv_injection_enable_set,
++	.get = param_get_bool,
++};
++module_param_cb(dv_injection_enable, &dv_enable_ops, &dv_injection_enable, 0644);
 +MODULE_PARM_DESC(dv_injection_enable,
 +		 "\n enable TV-led Dolby Vision metadata injection\n");
 +
@@ -129,16 +157,16 @@ index 0000000000..1111111111
 +MODULE_PARM_DESC(dv_metadata_len,
 +		 "\n length of the DM metadata in bytes (0 = derive from hex)\n");
 +
-+static unsigned int osd_canvas = 0xe1;
++static unsigned int osd_canvas = 0x40;
 +module_param(osd_canvas, uint, 0644);
 +MODULE_PARM_DESC(osd_canvas,
 +		 "\n canvas index the metadata is written to\n");
 +
-+/* one full frame in pixels: 3840x2160 for 4K, 1920x1080 for 1080p */
-+static unsigned int osd_pixel_offset = 8294400;
-+module_param(osd_pixel_offset, uint, 0644);
++/* Derived from the actual fb0 stride and visible height; never guessed. */
++static unsigned int osd_pixel_offset;
++module_param(osd_pixel_offset, uint, 0444);
 +MODULE_PARM_DESC(osd_pixel_offset,
-+		 "\n pixel offset inside the canvas where the metadata starts\n");
++		 "\n derived framebuffer page size in pixels (read only)\n");
 +
 +static unsigned int bytes_per_pixel = 4;
 +module_param(bytes_per_pixel, uint, 0644);
@@ -146,11 +174,11 @@ index 0000000000..1111111111
 +		 "\n bytes per pixel of the target canvas (4 = ARGB32)\n");
 +
 +static unsigned int odd_pattern = DV_INJ_ODD_INJECTION;
-+module_param(odd_pattern, uint, 0644);
++module_param(odd_pattern, uint, 0444);
 +MODULE_PARM_DESC(odd_pattern, "\n pixel pattern for a set bit\n");
 +
 +static unsigned int even_pattern = DV_INJ_EVEN_INJECTION;
-+module_param(even_pattern, uint, 0644);
++module_param(even_pattern, uint, 0444);
 +MODULE_PARM_DESC(even_pattern, "\n pixel pattern for a cleared bit\n");
 +
 +static unsigned int packet_repeat = 1;
@@ -161,15 +189,12 @@ index 0000000000..1111111111
 +module_param(always_send_vsif, bool, 0644);
 +MODULE_PARM_DESC(always_send_vsif, "\n send the Dolby VSIF on every frame\n");
 +
-+/* Which path carries the metadata to the sink.
-+ * 0 = canvas top-pixel injection (needs calibration),
-+ * 1 = native HDMI EMP infoframe (send_emp(); requires the sink to
-+ *     advertise Dolby Vision in its EDID).
++/* Keep the old switch for diagnostics, but only the checked canvas path
++ * (0) is supported. The former EMP experiment is deliberately unavailable.
 + */
 +static unsigned int dv_injection_path;
 +module_param(dv_injection_path, uint, 0644);
-+MODULE_PARM_DESC(dv_injection_path,
-+		 "\n 0: canvas top-pixel injection, 1: native EMP infoframe\n");
++MODULE_PARM_DESC(dv_injection_path, "\n checked canvas path only (0)\n");
 +
 +/* Write 1 to dump the sink Dolby Vision capabilities to dmesg. */
 +static unsigned int dv_info_dump;
@@ -222,38 +247,73 @@ index 0000000000..1111111111
 + * Parse the hex string handed over from user space.  Returns the
 + * number of bytes parsed, or a negative error code.
 + */
-+static int dv_injection_parse_metadata(const char *hex)
++/* A Display Management wire payload, not a compressed RPU NAL.
++ * The reference layout has a 70-byte fixed header, a block count at byte
++ * 70, then BE32 length / level / data extension records. All extensions
++ * must fit exactly. The serializer sets a 12-bit, 4:2:2 HDMI signal.
++ */
++static bool dv_injection_block_length(u8 level, u32 length)
 +{
-+	size_t len;
-+	size_t i;
-+	u8 val;
++	switch (level) {
++	case 1: case 3: return length == 6;
++	case 2: return length == 14;
++	case 4: case 11: return length == 4;
++	case 5: case 6: return length == 8;
++	case 8: return length == 13 || length == 15 || length == 17 ||
++		       length == 23 || length == 29;
++	case 9: return length == 1;
++	case 10: return length == 6 || length == 22;
++	case 254: return length == 2;
++	case 255: return length == 6;
++	default: return false;
++	}
++}
++
++static int dv_injection_validate_metadata(const u8 *data, u32 size)
++{
++	u32 offset = 71, i, length;
++
++	if (!data || size < 71 || size > DV_INJ_MAX_METADATA_SIZE)
++		return -EINVAL;
++	if (data[60] != 12 || data[61] > 2 || data[62] != 1 || data[63] > 1)
++		return -EINVAL;
++	for (i = 0; i < data[70]; i++) {
++		if (size - offset < 5)
++			return -EINVAL;
++		length = ((u32)data[offset] << 24) |
++			 ((u32)data[offset + 1] << 16) |
++			 ((u32)data[offset + 2] << 8) | data[offset + 3];
++		offset += 5;
++		if (!dv_injection_block_length(data[offset - 1], length) ||
++		    length > size - offset)
++			return -EINVAL;
++		offset += length;
++	}
++	return offset == size ? 0 : -EINVAL;
++}
++
++static int dv_injection_parse_metadata(const char *hex, u8 *out)
++{
++	size_t len, i;
 +
 +	if (!hex || !hex[0])
 +		return -EINVAL;
-+
 +	len = strlen(hex);
-+	if (len & 1)
++	if ((len & 1) || len / 2 > DV_INJ_MAX_METADATA_SIZE)
 +		return -EINVAL;
-+	if (len / 2 > DV_INJ_MAX_METADATA_SIZE)
-+		return -EINVAL;
-+
 +	for (i = 0; i < len / 2; i++) {
 +		int hi = dv_hex2bin(hex[i * 2]);
 +		int lo = dv_hex2bin(hex[i * 2 + 1]);
 +
 +		if (hi < 0 || lo < 0)
 +			return -EINVAL;
-+		val = (u8)((hi << 4) | lo);
-+		dm_metadata[i] = val;
++		out[i] = (hi << 4) | lo;
 +	}
-+	dm_metadata_size = len / 2;
-+
-+	if (dv_metadata_len && dv_metadata_len < dm_metadata_size)
-+		dm_metadata_size = dv_metadata_len;
-+
-+	dv_injection_log(1, "dv injection: %u bytes of DM metadata\n",
-+			 dm_metadata_size);
-+	return dm_metadata_size;
++	if (dv_metadata_len && dv_metadata_len != len / 2)
++		return -EINVAL;
++	if (dv_injection_validate_metadata(out, len / 2))
++		return -EINVAL;
++	return len / 2;
 +}
 +
 +/* CRC32 as used by the Dolby Vision metadata packets */
@@ -390,78 +450,100 @@ index 0000000000..1111111111
 + * canvas.  This is the "top pixel" embedding the TV expects for
 + * TV-led Dolby Vision.
 + */
-+static int dv_injection_write_canvas(void)
++/* Pure checked arithmetic, also exercised by the host regression test. */
++static int dv_injection_canvas_layout(u32 stride, u32 xres, u32 yres,
++				     u32 yvirtual, u64 allocation, u32 num_pkts,
++				     u32 repeat, u64 *page_bytes, u32 *pages)
 +{
-+	struct canvas_s cs;
-+	void *pixel_buffer;
-+	u8 pkt_num;
-+	u32 i, page;
-+	u32 pkt_stride;
++	u64 metadata_bytes, total;
 +
-+	memset(&cs, 0, sizeof(cs));
-+	canvas_read(osd_canvas, &cs);
-+	if (!cs.addr || !cs.width) {
-+		dv_injection_log(1, "dv injection: canvas %u not valid\n",
-+				 osd_canvas);
++	if (!stride || !xres || !yres || !yvirtual || (stride & 3) ||
++	    (u64)xres * 4 > stride || yvirtual % yres ||
++	    !num_pkts || num_pkts > DV_INJ_MAX_NUM_HDR_DM_PACKETS ||
++	    repeat < 1 || repeat > DV_INJ_NUM_HDR_DM_PACKET_REPEATS)
 +		return -EINVAL;
-+	}
-+
-+	pixel_buffer = phys_to_virt((phys_addr_t)cs.addr);
-+	if (!pixel_buffer)
-+		return -ENOMEM;
-+
-+	pkt_stride = DV_INJ_PIXELS_PER_PKT * bytes_per_pixel;
-+
-+	/*
-+	 * The OSD canvas is double buffered: page 0 starts at pixel 0 and
-+	 * page 1 one full frame later (osd_pixel_offset).  Both pages have to
-+	 * carry the metadata, otherwise only every other frame is valid for
-+	 * the sink.  Every packet keeps room for
-+	 * DV_INJ_NUM_HDR_DM_PACKET_REPEATS copies, as in the reference
-+	 * implementation.
-+	 */
-+	for (page = 0; page < 2; page++) {
-+		for (pkt_num = 0; pkt_num < dm_packet.num_pkts; pkt_num++) {
-+			u32 pkt_start = page * osd_pixel_offset +
-+				pkt_num * DV_INJ_NUM_HDR_DM_PACKET_REPEATS *
-+				DV_INJ_PIXELS_PER_PKT;
-+			u8 *dst = (u8 *)pixel_buffer +
-+				pkt_start * bytes_per_pixel;
-+
-+			for (i = 0; i < packet_repeat; i++) {
-+				if (bytes_per_pixel == 4) {
-+					memcpy(dst + i * pkt_stride,
-+					       dm_packet.pixel_data[pkt_num],
-+					       pkt_stride);
-+				} else {
-+					u32 px;
-+
-+					for (px = 0; px < DV_INJ_PIXELS_PER_PKT;
-+					     px++) {
-+						u16 v = (u16)
-+							(dm_packet.pixel_data[pkt_num][px] &
-+							 0xffff);
-+
-+						memcpy(dst + i * pkt_stride + px * 2,
-+						       &v, 2);
-+					}
-+				}
-+			}
-+		}
-+	}
-+
-+	dv_injection_log(2, "dv injection: metadata written to canvas %u\n",
-+			 osd_canvas);
++	*pages = yvirtual / yres;
++	if (*pages < 1 || *pages > 3)
++		return -EINVAL;
++	*page_bytes = (u64)stride * yres;
++	total = (u64)stride * yvirtual;
++	metadata_bytes = ((u64)(num_pkts - 1) *
++		DV_INJ_NUM_HDR_DM_PACKET_REPEATS + repeat) *
++		DV_INJ_PIXELS_PER_PKT * 4;
++	if (total > allocation || metadata_bytes > *page_bytes ||
++	    *page_bytes / 4 > 0xffffffffULL)
++		return -EINVAL;
 +	return 0;
 +}
 +
-+static int dv_injection_send_vsif(void)
++static int dv_injection_write_canvas(const struct vinfo_s *vinfo)
 +{
-+	const struct vinfo_s *vinfo = get_current_vinfo();
++	struct canvas_s cs;
++	struct fb_info *info;
++	u64 page_bytes;
++	u32 pages, page, pkt, repeat;
++	u32 canvas_index = READ_ONCE(osd_canvas);
++	u32 repeats = READ_ONCE(packet_repeat);
++	int ret = -EINVAL;
++
++	if (READ_ONCE(bytes_per_pixel) != 4 || canvas_index > 255)
++		return -EINVAL;
++	/* console_lock protects registration/mode changes, fb_info.lock the
++	 * driver's buffer geometry. Never derive a pointer from an arbitrary
++	 * canvas physical address; use fb0's existing mapped screen_base.
++	 */
++	console_lock();
++	info = registered_fb[0];
++	if (!info || !lock_fb_info(info))
++		goto out_console;
++	memset(&cs, 0, sizeof(cs));
++	canvas_read(canvas_index, &cs);
++	if (!info->screen_base || !info->fix.smem_len ||
++	    info->var.bits_per_pixel != 32 ||
++	    cs.addr != info->fix.smem_start ||
++	    cs.width != info->fix.line_length ||
++	    cs.height < info->var.yres_virtual ||
++	    info->var.xres != vinfo->width || info->var.yres != vinfo->height)
++		goto out_fb;
++	ret = dv_injection_canvas_layout(info->fix.line_length,
++		info->var.xres, info->var.yres, info->var.yres_virtual,
++		info->fix.smem_len, dm_packet.num_pkts, repeats,
++		&page_bytes, &pages);
++	if (ret)
++		goto out_fb;
++	osd_pixel_offset = page_bytes / 4;
++	for (page = 0; page < pages; page++) {
++		for (pkt = 0; pkt < dm_packet.num_pkts; pkt++) {
++			for (repeat = 0; repeat < repeats; repeat++) {
++				u64 offset = page * page_bytes +
++					(pkt * DV_INJ_NUM_HDR_DM_PACKET_REPEATS +
++					 repeat) * DV_INJ_PIXELS_PER_PKT * 4;
++
++				memcpy_toio((u8 __iomem *)info->screen_base + offset,
++					dm_packet.pixel_data[pkt], DV_INJ_PIXELS_PER_PKT * 4);
++			}
++		}
++	}
++	/* Order mapped buffer writes before announcing the DV signal. */
++	wmb();
++	ret = 0;
++out_fb:
++	unlock_fb_info(info);
++out_console:
++	console_unlock();
++	if (!ret)
++		dv_injection_log(2, "dv injection: metadata written to canvas %u\n", osd_canvas);
++	return ret;
++}
++
++static int dv_injection_send_vsif(const struct vinfo_s *vinfo)
++{
 +	struct dv_vsif_para vsif;
 +
 +	if (!vinfo || !vinfo->vout_device ||
-+	    !vinfo->vout_device->fresh_tx_vsif_pkt)
++	    !vinfo->vout_device->fresh_tx_vsif_pkt ||
++	    !vinfo->vout_device->dv_info ||
++	    vinfo->vout_device->dv_info->ieeeoui != 0x00d046)
 +		return -EINVAL;
 +
 +	memset(&vsif, 0, sizeof(vsif));
@@ -497,78 +579,105 @@ index 0000000000..1111111111
 +		dv->sup_global_dimming, dv->dm_major_ver, dv->dm_minor_ver);
 +}
 +
-+/*
-+ * Native EMP path: hand the DM metadata straight to the HDMI TX.
-+ * send_emp() re-packs it into VS-EMDS infoframes, which is what a
-+ * TV-led sink expects in the infoframe instead of in the top pixels.
-+ *
-+ * The DM metadata we accept is already the byte stream that
-+ * amdolby_vision.c's convert_hdmi_metadata() would produce from its
-+ * raw_metadata words, so no repacking is needed here.
-+ */
-+static int dv_injection_send_emp(void)
-+{
-+	int ret;
-+
-+	ret = send_emp(EOTF_T_DOLBYVISION, YUV422_BIT12, NULL,
-+		       dm_metadata, dm_metadata_size, false);
-+	if (ret < 0) {
-+		dv_injection_log(1, "dv injection: send_emp failed (%d)\n", ret);
-+		return ret;
-+	}
-+	dv_injection_log(2, "dv injection: send_emp %u bytes ok\n",
-+			 dm_metadata_size);
-+	return 0;
-+}
-+
-+static bool dv_emp_dirty = true;
 +static struct work_struct dv_inj_work;
 +static struct timer_list dv_inj_timer;
-+static unsigned int dv_inj_ticks;
++static bool dv_inj_ready;
 +
-+/*
-+ * The metadata has to reach the sink continuously: the canvas pixels are
-+ * reused by the OSD, and the EMP infoframe only stays latched while it is
-+ * refreshed.  A frame callback looks like the natural place for that, but
-+ * the video path does not call update_vframe_src_fmt() for ordinary
-+ * playback -- only deinterlace and v4lvideo do, when SEI metadata is
-+ * refreshed -- so the work is driven by a timer instead.  send_emp() takes
-+ * the hdmitx locks, hence the workqueue.
++/* Static-DM diagnostic refresh only. A future automatic pipeline must
++ * obtain metadata at decode and apply it with the displayed frame.
 + */
 +#define DV_INJ_INTERVAL_MS	100
 +
++/* Called with dv_injection_lock held. Clearing ownership first permits
++ * the normal HDR/SDR producer to resume and the explicit DV-off packet
++ * restores the AVI colour/range state through the existing HDMI driver.
++ */
++static void dv_injection_deactivate(void)
++{
++	const struct vinfo_s *vinfo;
++
++	if (!dv_injection_active)
++		return;
++	WRITE_ONCE(dv_injection_active, false);
++	vinfo = get_current_vinfo();
++	if (vinfo && vinfo->vout_device &&
++	    vinfo->vout_device->fresh_tx_vsif_pkt)
++		vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_NULL,
++			RGB_8BIT, NULL, true);
++}
++
++/* Already supplied by the amvideo object containing this implementation. */
++extern u32 get_video_enabled(void);
++
 +static void dv_inj_work_fn(struct work_struct *work)
 +{
++	const struct vinfo_s *vinfo;
++
++	mutex_lock(&dv_injection_lock);
 +	if (!dv_injection_enable || !dm_metadata_size)
-+		return;
-+
-+	if (dv_info_dump) {
-+		dv_info_dump = 0;
-+		dv_injection_dump_sink_info();
++		goto deactivate;
++	/* This remains a manual, static-DM diagnostic. Stop rather than reuse
++	 * a previous clip's bytes after the video layer is disabled.
++	 */
++	if (!get_video_enabled()) {
++		dv_injection_enable = false;
++		dm_metadata_size = 0;
++		goto deactivate;
 +	}
++	vinfo = get_current_vinfo();
++	if (!vinfo || !vinfo->vout_device ||
++	    !vinfo->vout_device->fresh_tx_vsif_pkt ||
++	    !vinfo->vout_device->dv_info ||
++	    vinfo->vout_device->dv_info->ieeeoui != 0x00d046)
++		goto deactivate;
++	/* The unvalidated EMP path cannot own output arbitration. */
++	if (dv_injection_path != 0 || !always_send_vsif ||
++	    dv_injection_write_canvas(vinfo) || dv_injection_send_vsif(vinfo))
++		goto deactivate;
++	WRITE_ONCE(dv_injection_active, true);
++	mutex_unlock(&dv_injection_lock);
++	return;
++deactivate:
++	dv_injection_deactivate();
++	mutex_unlock(&dv_injection_lock);
++}
 +
-+	if (dv_injection_path == 1) {
-+		/* on metadata change, plus a once-a-second keep-alive */
-+		if (dv_emp_dirty || (dv_inj_ticks % 10) == 0) {
-+			dv_emp_dirty = false;
-+			dv_injection_send_emp();
++static int dv_injection_enable_set(const char *val, const struct kernel_param *kp)
++{
++	struct kernel_param temporary = *kp;
++	bool enabled;
++	int ret;
++
++	temporary.arg = &enabled;
++	ret = param_set_bool(val, &temporary);
++	if (ret || (enabled && !dv_inj_ready))
++		return ret ? ret : -EAGAIN;
++	mutex_lock(&dv_injection_lock);
++	*(bool *)kp->arg = enabled;
++	if (!enabled)
++		dv_injection_deactivate();
++	mutex_unlock(&dv_injection_lock);
++	/* No worker may announce DV after the disable operation returns. */
++	if (dv_inj_ready) {
++		if (enabled) {
++			mod_timer(&dv_inj_timer,
++				jiffies + msecs_to_jiffies(DV_INJ_INTERVAL_MS));
++		} else {
++			del_timer_sync(&dv_inj_timer);
++			cancel_work_sync(&dv_inj_work);
 +		}
-+		return;
 +	}
-+
-+	if (dv_injection_write_canvas() < 0)
-+		return;
-+
-+	if (always_send_vsif)
-+		dv_injection_send_vsif();
++	return 0;
 +}
 +
 +static void dv_inj_timer_fn(unsigned long data)
 +{
-+	dv_inj_ticks++;
++	if (!READ_ONCE(dv_injection_enable))
++		return;
 +	schedule_work(&dv_inj_work);
-+	mod_timer(&dv_inj_timer,
-+		  jiffies + msecs_to_jiffies(DV_INJ_INTERVAL_MS));
++	if (READ_ONCE(dv_injection_enable))
++		mod_timer(&dv_inj_timer,
++			  jiffies + msecs_to_jiffies(DV_INJ_INTERVAL_MS));
 +}
 +
 +/*
@@ -593,7 +702,7 @@ index 0000000000..1111111111
 + */
 +bool dv_injection_block_hdr10(void)
 +{
-+	return dv_injection_enable && always_send_vsif && dm_metadata_size;
++	return READ_ONCE(dv_injection_active) && READ_ONCE(dv_injection_enable);
 +}
 +EXPORT_SYMBOL(dv_injection_block_hdr10);
 +
@@ -602,45 +711,42 @@ index 0000000000..1111111111
 + */
 +int dv_injection_set_metadata(const u8 *data, u32 size)
 +{
-+	if (!data || !size || size > DV_INJ_MAX_METADATA_SIZE)
-+		return -EINVAL;
++	int ret = dv_injection_validate_metadata(data, size);
 +
-+	memcpy(dm_metadata, data, size);
-+	dm_metadata_size = size;
-+
-+	return dv_injection_form_packets(dm_metadata, dm_metadata_size);
++	if (ret)
++		return ret;
++	mutex_lock(&dv_injection_lock);
++	ret = dv_injection_form_packets(data, size);
++	if (!ret) {
++		memcpy(dm_metadata, data, size);
++		dm_metadata_size = size;
++	}
++	mutex_unlock(&dv_injection_lock);
++	return ret;
 +}
 +
-+/*
-+ * Parse the hex module parameter and build the packets.  The 4.9
-+ * kernel has no param_cb()/param_cnop_string(), so the operations are
-+ * supplied as a static kernel_param_ops and the value is a bounded
-+ * buffer handed over through kp->arg.
-+ */
 +static int dv_injection_param_set(const char *val,
 +				   const struct kernel_param *kp)
 +{
-+	char *buf = (char *)kp->arg;
-+	int ret;
++	u8 parsed[DV_INJ_MAX_METADATA_SIZE];
++	int size, ret;
 +
-+	if (!val || !buf)
++	if (!val || strlen(val) >= sizeof(dv_metadata))
 +		return -EINVAL;
-+	if (strlen(val) >= sizeof(dv_metadata))
-+		return -EINVAL;
-+
-+	strcpy(buf, val);
-+	ret = dv_injection_parse_metadata(buf);
-+	if (ret < 0) {
-+		dv_injection_log(1, "dv injection: bad metadata (%d)\n", ret);
-+		return ret;
++	mutex_lock(&dv_injection_lock);
++	size = dv_injection_parse_metadata(val, parsed);
++	if (size < 0) {
++		mutex_unlock(&dv_injection_lock);
++		return size;
 +	}
-+	ret = dv_injection_form_packets(dm_metadata, dm_metadata_size);
-+	if (ret < 0)
-+		return ret;
-+
-+	/* new metadata: the EMP infoframe has to be refreshed */
-+	dv_emp_dirty = true;
-+	return 0;
++	ret = dv_injection_form_packets(parsed, size);
++	if (!ret) {
++		strcpy(dv_metadata, val);
++		memcpy(dm_metadata, parsed, size);
++		dm_metadata_size = size;
++	}
++	mutex_unlock(&dv_injection_lock);
++	return ret;
 +}
 +
 +static int dv_injection_param_get(char *buffer,
@@ -666,8 +772,7 @@ index 0000000000..1111111111
 +{
 +	INIT_WORK(&dv_inj_work, dv_inj_work_fn);
 +	setup_timer(&dv_inj_timer, dv_inj_timer_fn, 0);
-+	mod_timer(&dv_inj_timer,
-+		  jiffies + msecs_to_jiffies(DV_INJ_INTERVAL_MS));
++	dv_inj_ready = true;
 +	dv_injection_log(1, "dv injection: module loaded\n");
 +	return 0;
 +}
@@ -676,6 +781,9 @@ index 0000000000..1111111111
 +{
 +	del_timer_sync(&dv_inj_timer);
 +	cancel_work_sync(&dv_inj_work);
++	mutex_lock(&dv_injection_lock);
++	dv_injection_deactivate();
++	mutex_unlock(&dv_injection_lock);
 +	dv_injection_log(1, "dv injection: module unloaded\n");
 +}
 +
@@ -713,46 +821,9 @@ index a93fd94..e0e90c6 100644
  	return 0;
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
-diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
---- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
-+++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
-@@ -27,6 +27,9 @@
- #include <linux/init.h>
- #include <linux/device.h>
- #include <linux/mm.h>
-+#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+#include <linux/amlogic/media/video_sink/dv_injection.h>
-+#endif
- #include <linux/major.h>
- #include <linux/platform_device.h>
- #include <linux/pinctrl/consumer.h>
-@@ -1612,6 +1615,11 @@
- struct master_display_info_s drm_config_data;
- static void hdmitx_set_drm_pkt(struct master_display_info_s *data)
- {
-+#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+	/* the Dolby VSIF must survive the HDR10 base layer of a DV stream */
-+	if (dv_injection_block_hdr10())
-+		return;
-+#endif
- 	struct hdmitx_dev *hdev = &hdmitx_device;
- 	struct hdr_info *hdr_info = &hdev->rxcap.hdr_info;
- 	unsigned char DRM_HB[3] = {0x87, 0x1, 26};
-@@ -1877,6 +1885,11 @@
- 	unsigned long flags = 0;
- 
- 	hdmi_debug();
-+#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+	/* anything but Dolby Vision would override the injected VSIF */
-+	if (type != EOTF_T_DOLBYVISION && dv_injection_block_hdr10())
-+		return;
-+#endif
- 	spin_lock_irqsave(&hdev->edid_spinlock, flags);
- 	if (hdev->bist_lock) {
- 		spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000..85f73aa
+index 0000000..f49351d
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
 @@ -0,0 +1,23 @@
