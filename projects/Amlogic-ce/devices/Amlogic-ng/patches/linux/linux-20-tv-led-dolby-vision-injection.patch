@@ -28,16 +28,23 @@ diff --git a/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c b/drivers/am
  #include "reg_helper.h"
  #include "hdr/gamut_convert.h"
  #include "hdr/am_cuva_hdr_tm.h"
-@@ -2288,6 +2291,62 @@
+@@ -2287,7 +2290,69 @@
+ 
  	memset(&hdr_mtx_param, 0, sizeof(struct hdr_proc_mtx_param_s));
  	memset(&hdr_lut_param, 0, sizeof(struct hdr_proc_lut_param_s));
- 
++
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
 +	/* TV-led Dolby Vision (profile 5) needs the device side reshaping:
 +	 * EOTF/OOTF/OETF tables plus gamut matrices and chroma gain, programmed
 +	 * in the same order the vendor HDR2 implementation uses.
 +	 */
-+	if (module_sel == VD1_HDR && dv_injection_need_reshaping()) {
++	if (module_sel == VD1_HDR && dv_injection_need_reshaping() &&
++	    !is_hdr_tvmode()) {
++		/* TV-led Dolby Vision is reshaped by the sink; the device must
++		 * leave the pixels alone in that mode.  This branch therefore
++		 * only runs for player-led (LLDV), which is the case the vendor
++		 * build handles with the same sequence.
++		 */
 +		for (i = 0; i < HDR2_EOTF_LUT_SIZE; i++)
 +			hdr_lut_param.eotf_lut[i] = eo_y_lut_pq[i];
 +		for (i = 0; i < HDR2_OETF_LUT_SIZE; i++) {
@@ -50,7 +57,7 @@ diff --git a/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c b/drivers/am
 +		hdr_lut_param.lut_on = LUT_ON;
 +		hdr_lut_param.cgain_en = LUT_ON;
 +		hdr_lut_param.hist_en = LUT_OFF;
-+
+ 
 +		/* hdr_mtx_param was just zeroed.  A zero 3x3 blacks the whole
 +		 * picture, so seed it with the same bypass values the bypass
 +		 * branch uses until the DV gamut coefficients are derived from
