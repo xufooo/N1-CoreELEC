@@ -1,26 +1,4 @@
-# CoreELEC 21.3 for Phicomm N1
-
-Community USB baseline based on official `21.3-Omega`. Work in progress;
-device boot/playback and Dolby Vision have not been verified.
-
-- [Build and artifacts](docs/n1-build.md)
-- [Community sources and patch decisions](docs/n1-sources.md)
-- [Detailed patch review (Chinese)](docs/n1-patch-review.md)
-- [DV reference-chain review and current limits (Chinese)](docs/n1-dv-reference-review-2026-11-02.md)
-- [Device and playback acceptance](docs/n1-acceptance.md)
-
-Use a spare USB stick.
-
-The baseline ships one experimental DV patch, kept as a separate, individually
-identifiable file: `linux-20-tv-led-dolby-vision-injection.patch`. It adds a
-TV-led Dolby Vision metadata injection module (compiled in, inert until
-`dv_injection_enable` is set). It accepts manually supplied HDMI DM bytes;
-automatic frame metadata and P5 pixel reshaping are not implemented. Correct
-Dolby Vision playback has not been verified. See the
-[reference-chain review](docs/n1-dv-reference-review-2026-11-02.md) before using
-the historical experiment notes.
-
-# CoreELEC upstream
+# CoreELEC
 
 CoreELEC is a 'Just enough OS' Linux distribution for running the award-winning [Kodi](https://kodi.tv) software on popular low-cost hardware. CoreELEC is a minor fork of [LibreELEC](https://libreelec.tv), it's built by the community for the community. [CoreELEC website](http://coreelec.org).
 

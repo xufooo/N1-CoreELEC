@@ -43,3 +43,6 @@ tools/mkpkg/*.git
 
 # ignore old linux configs
 projects/**/*.old
+
+# N1 research, reviews and device notes are maintained in OpenViking.
+/docs/n1-*.md

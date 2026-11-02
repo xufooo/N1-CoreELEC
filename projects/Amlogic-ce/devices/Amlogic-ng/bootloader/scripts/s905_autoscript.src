@@ -1,4 +1,4 @@
-# Phicomm N1 USB boot. Adapted from RuralHunter and Damenly; see docs/n1-sources.md.
+# Phicomm N1 USB boot. Adapted from RuralHunter and Damenly.
 # Only load this USB installation; do not change saved U-Boot environment.
 setenv env_addr "0x10400000"
 setenv kernel_addr "0x11000000"
