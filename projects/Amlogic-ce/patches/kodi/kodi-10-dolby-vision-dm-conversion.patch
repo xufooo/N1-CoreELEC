@@ -1,0 +1,14 @@
+--- a/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
++++ b/xbmc/cores/VideoPlayer/DVDCodecs/Video/DVDVideoCodecAmlogic.cpp
+@@ -321,6 +321,11 @@
+             m_bitstream->SetDoviZeroLevel5(
+                 CServiceBroker::GetSettingsComponent()->GetSettings()->GetBool(
+                     CSettings::SETTING_COREELEC_AMLOGIC_DOVIZEROLEVEL5));
++            /* The kernel's Dolby Vision packetizer expects the RPU rewritten
++             * into the HDMI DM serialisation.  Upstream only enables that
++             * conversion on Android, so switch it on for the Amlogic TV-led
++             * path as well. */
++            m_bitstream->SetConvertDovi(true);
+           }
+         }
+       }
