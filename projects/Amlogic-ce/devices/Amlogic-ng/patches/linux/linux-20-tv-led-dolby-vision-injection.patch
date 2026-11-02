@@ -28,7 +28,7 @@ diff --git a/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c b/drivers/am
  #include "reg_helper.h"
  #include "hdr/gamut_convert.h"
  #include "hdr/am_cuva_hdr_tm.h"
-@@ -2287,6 +2290,37 @@
+@@ -2287,7 +2290,40 @@
  
  	memset(&hdr_mtx_param, 0, sizeof(struct hdr_proc_mtx_param_s));
  	memset(&hdr_lut_param, 0, sizeof(struct hdr_proc_lut_param_s));
@@ -51,21 +51,24 @@ diff --git a/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c b/drivers/am
 +		hdr_lut_param.lut_on = LUT_ON;
 +		hdr_lut_param.cgain_en = LUT_ON;
 +		hdr_lut_param.hist_en = LUT_OFF;
-+
-+		set_hdr_matrix(module_sel, HDR_IN_MTX, &hdr_mtx_param, NULL);
+ 
++		/* The gamut matrices are deliberately left alone: hdr_mtx_param
++		 * is empty here, and programming a zero matrix would black the
++		 * picture.  Only the transfer tables and chroma gain are set
++		 * until the DV gamut coefficients are known.
++		 */
 +		set_eotf_lut(module_sel, &hdr_lut_param);
-+		set_hdr_matrix(module_sel, HDR_GAMUT_MTX, &hdr_mtx_param, NULL);
 +		set_ootf_lut(module_sel, &hdr_lut_param);
 +		set_oetf_lut(module_sel, &hdr_lut_param);
-+		set_hdr_matrix(module_sel, HDR_OUT_MTX, &hdr_mtx_param, NULL);
 +		set_c_gain(module_sel, &hdr_lut_param);
 +		hdr_hist_config(module_sel, &hdr_lut_param);
 +		return hdr_process_select;
 +	}
 +#endif
- 
++
  	if ((module_sel == OSD1_HDR) &&
  	    (cpu_after_eq(MESON_CPU_MAJOR_ID_G12A))) {
+ 		/* turn off OSD mtx and use HDR for g12, sm1, tl1 */
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
 index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
