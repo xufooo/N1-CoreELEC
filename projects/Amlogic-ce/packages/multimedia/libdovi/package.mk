@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Copyright (C) 2023-present Team CoreELEC (https://coreelec.org)
 
-# Built from source unconditionally: the Dolby Vision injection path needs the
-# HDMI DM serialisation added by
-# patches/libdovi-01-hdmi-dm-serialization.patch, and the prebuilt archives on
-# sources.coreelec.org do not carry it.
+# Built from the reference fork on purpose: the TV-led Dolby Vision packetizer
+# needs the HDMI DM serialisation that only this tree carries (see
+# docs/n1-dv-implementation-plan-2026-11-02.md in OpenViking).
+#
+# The fork's diff does NOT apply to upstream libdovi-3.3.1 (dovi_rpu.rs
+# rejects), so the source is taken from the fork itself instead of patching a
+# release tarball.  PKG_SOURCE_DIR tells scripts/unpack where it extracted.
 PKG_NAME="libdovi"
-PKG_VERSION="3.3.1"
-PKG_SHA256="4cd7a4c418fd8af1da13278ce7524c15b7fdf61e1fe53663aa291c68c5062777"
-PKG_SITE="https://github.com/quietvoid/dovi_tool"
-PKG_URL="https://github.com/quietvoid/dovi_tool/archive/${PKG_NAME}-${PKG_VERSION}.tar.gz"
+PKG_VERSION="d4ad4ba7e6f5acef6c7321dac0139992a082cd8f"
+PKG_SHA256="e75fa34dbb755902f867383e87c28df7062baaa61c780978daaf94ed868d3d60"
+PKG_SOURCE_DIR="dovi_tool-${PKG_VERSION}"
+PKG_SITE="https://github.com/doppingkoala/dovi_tool"
+PKG_URL="https://github.com/doppingkoala/dovi_tool/archive/${PKG_VERSION}.tar.gz"
 PKG_DEPENDS_TARGET="toolchain cargo-c:host"
 PKG_LICENSE="MIT"
 PKG_LONGDESC="dovi_tool is a CLI tool combining multiple utilities for working with Dolby Vision."
