@@ -28,11 +28,10 @@ diff --git a/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c b/drivers/am
  #include "reg_helper.h"
  #include "hdr/gamut_convert.h"
  #include "hdr/am_cuva_hdr_tm.h"
-@@ -2287,7 +2290,40 @@
- 
+@@ -2288,6 +2291,62 @@
  	memset(&hdr_mtx_param, 0, sizeof(struct hdr_proc_mtx_param_s));
  	memset(&hdr_lut_param, 0, sizeof(struct hdr_proc_lut_param_s));
-+
+ 
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
 +	/* TV-led Dolby Vision (profile 5) needs the device side reshaping:
 +	 * EOTF/OOTF/OETF tables plus gamut matrices and chroma gain, programmed
@@ -51,13 +50,36 @@ diff --git a/drivers/amlogic/media/enhancement/amvecm/set_hdr2_v0.c b/drivers/am
 +		hdr_lut_param.lut_on = LUT_ON;
 +		hdr_lut_param.cgain_en = LUT_ON;
 +		hdr_lut_param.hist_en = LUT_OFF;
- 
-+		/* The gamut matrices are deliberately left alone: hdr_mtx_param
-+		 * is empty here, and programming a zero matrix would black the
-+		 * picture.  Only the transfer tables and chroma gain are set
-+		 * until the DV gamut coefficients are known.
++
++		/* hdr_mtx_param was just zeroed.  A zero 3x3 blacks the whole
++		 * picture, so seed it with the same bypass values the bypass
++		 * branch uses until the DV gamut coefficients are derived from
++		 * the metadata.
 +		 */
++		hdr_mtx_param.mtx_gamut_mode = 1;
++		hdr_mtx_param.mtx_on = MTX_ON;
++		for (i = 0; i < MTX_NUM_PARAM; i++) {
++			hdr_mtx_param.mtx_in[i] = bypass_coeff[i];
++			hdr_mtx_param.mtx_cgain[i] = bypass_coeff[i];
++			hdr_mtx_param.mtx_ogain[i] = bypass_coeff[i];
++			hdr_mtx_param.mtx_out[i] = bypass_coeff[i];
++			if (i < 9)
++				hdr_mtx_param.mtx_gamut[i] = gamut_bypass[i];
++			if (i < 3) {
++				hdr_mtx_param.mtxi_pre_offset[i] = bypass_pre[i];
++				hdr_mtx_param.mtxi_pos_offset[i] = bypass_pos[i];
++				hdr_mtx_param.mtxo_pre_offset[i] = bypass_pre[i];
++				hdr_mtx_param.mtxo_pos_offset[i] = bypass_pos[i];
++			}
++		}
++
++		set_hdr_matrix(module_sel, HDR_IN_MTX, &hdr_mtx_param, NULL);
 +		set_eotf_lut(module_sel, &hdr_lut_param);
++		set_hdr_matrix(module_sel, HDR_GAMUT_MTX, &hdr_mtx_param, NULL);
++		set_ootf_lut(module_sel, &hdr_lut_param);
++		set_oetf_lut(module_sel, &hdr_lut_param);
++		set_hdr_matrix(module_sel, HDR_OUT_MTX, &hdr_mtx_param, NULL);
++		set_c_gain(module_sel, &hdr_lut_param);
 +		set_ootf_lut(module_sel, &hdr_lut_param);
 +		set_oetf_lut(module_sel, &hdr_lut_param);
 +		set_c_gain(module_sel, &hdr_lut_param);
