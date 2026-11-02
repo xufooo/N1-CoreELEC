@@ -53,10 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..2222222222
+index 0000000000..4444444444
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,792 @@
+@@ -0,0 +1,812 @@
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
@@ -722,6 +722,26 @@ index 0000000000..2222222222
 +	return dv_injection_render_slot(slot);
 +}
 +EXPORT_SYMBOL(dv_injection_render_frame);
++
++static int dv_injection_enable_set(const char *val, const struct kernel_param *kp)
++{
++	struct kernel_param temporary = *kp;
++	bool enabled;
++	int ret;
++
++	temporary.arg = &enabled;
++	ret = param_set_bool(val, &temporary);
++	if (ret || (enabled && !dv_inj_ready))
++		return ret ? ret : -EAGAIN;
++	mutex_lock(&dv_injection_lock);
++	*(bool *)kp->arg = enabled;
++	if (!enabled)
++		dv_injection_deactivate();
++	mutex_unlock(&dv_injection_lock);
++	if (!enabled)
++		memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++	return 0;
++}
 +
 +/*
 + * Called from the video sink when a frame updates the source format.  The
