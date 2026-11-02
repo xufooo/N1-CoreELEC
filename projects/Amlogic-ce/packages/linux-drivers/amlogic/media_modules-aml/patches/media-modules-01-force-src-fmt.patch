@@ -1,0 +1,27 @@
+--- a/drivers/frame_provider/decoder/h265/vh265.c
++++ b/drivers/frame_provider/decoder/h265/vh265.c
+@@ -3326,6 +3326,15 @@
+ 	int mc_buffer_size_u_v_h;
+ };
+ 
++/* Deliver the decoder aux data to the video sink even when the v4l path is
++ * not in use: the TV-led Dolby Vision injection needs the per-frame metadata
++ * on every playback path, not only under v4l.
++ */
++static bool force_src_fmt = true;
++module_param(force_src_fmt, bool, 0664);
++MODULE_PARM_DESC(force_src_fmt, "\n force_src_fmt\n");
++
++
+ #ifndef MV_USE_FIXED_BUF
+ static void dealloc_mv_bufs(struct hevc_state_s *hevc)
+ {
+@@ -10400,7 +10409,7 @@
+ 			PR_INFO(hevc->index);
+ 		}
+ 
+-		if (hevc->is_used_v4l)
++		if (hevc->is_used_v4l || force_src_fmt)
+ 			update_vframe_src_fmt(vf,
+ 				hevc->m_PIC[index]->aux_data_buf,
+ 				hevc->m_PIC[index]->aux_data_size,
