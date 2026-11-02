@@ -132,6 +132,99 @@ dv injection: formed 2 packets from 235 bytes
 
 `dv_injection_process_frame()` 仍然保留（`video.c` 的调用点不动），但它现在只负责"确保定时器在跑"。
 
+## 4.3 实机验证记录（2026-11-02）：canvas 路径跑通
+
+### 4.3.1 社区参考实现（决定性证据）
+
+[doppingkoala/common_drivers](https://github.com/doppingkoala/common_drivers/tree/dv-doppingkoala)
+的 `drivers/media/video_sink/dv_injection.c`（1348 行）是社区里**真正点亮电视杜比视界**的实现，
+另有最小公开骨架分支 `public_dv_poc`。它的机制是：
+
+1. 把 DM 元数据按 **128 字节/包**分包（头 `[0]=0x00/0x40/0x80/0xC0`、`[1]=dm[0]`、
+   首包 `[3:4]=size`，CRC32 大端放 124..127）
+2. 每个包再按 **1 bit/像素** 展开成 1024 个像素（`0xFFFFFFFF` = 1，`0xFF000000` = 0）
+3. 写进 **OSD canvas 的像素缓冲**（双缓冲：page 0 与 page 1 各写一份）
+4. 发 `fresh_tx_vsif_pkt(EOTF_T_DOLBYVISION, RGB_8BIT, dv_signal=1)`
+
+**社区没有任何一条走 EMP infoframe 的成功案例。** 本项目早期自行设计的 EMP 路径属于方向错误。
+
+### 4.3.2 对照参考实现后修正的四处（提交 `681ecfec41`）
+
+| 项 | 修正前（错） | 修正后 |
+|---|---|---|
+| `osd_canvas` 默认 | `0` → `canvas_read` 必然失败 | `0xe1`（参考值，实机见 4.3.3） |
+| `osd_pixel_offset` 默认 | `0` | `8294400`（4K 一帧像素数） |
+| 双缓冲写入 | 只写一个位置且偏移算错 | page 0 与 page 1 各写一份 |
+| 输出格式 | 曾试 `422,12bit` | **RGB 8bit**（DV-Std 要求） |
+
+### 4.3.3 实机关键事实：4.9 上 OSD canvas 号是 64，不是 0xe1
+
+```
+$ dmesg | grep "canvas.idx"
+fb: osd[0] canvas.idx =0x40
+fb: osd[0] canvas.addr=0x77c00000
+fb: osd[0] canvas.width=7680
+fb: osd[0] canvas.height=3240
+```
+
+`0xe1`（225）是其它内核版本/其它 SoC 的编号，在本机写入后 dmesg 只报
+`dv injection: canvas 225 not valid`。**正确做法：从 dmesg 的 `canvas.idx` 取本机实际编号**
+（本机 = `0x40` = 64）。
+
+### 4.3.4 已跑通的完整命令序列（本机实测）
+
+```sh
+# 1) 指定本机 canvas
+echo 64 > /sys/module/amvideo/parameters/osd_canvas
+
+# 2) 灌一帧的 RPU 元数据（235 字节，hex 470 字符）
+printf '%s' "<RPU_HEX>" > /sys/module/amvideo/parameters/dv_metadata
+
+# 3) 走 canvas 路径 + 打开日志
+echo 0 > /sys/module/amvideo/parameters/dv_injection_path
+echo 2 > /sys/module/amvideo/parameters/dv_injection_log_level
+
+# 4) 播放 4K 24p 的 DV 样片（输出自动切到 2160p24）
+
+# 5) 播放中打开注入（不要在 GUI 上开，否则会污染桌面画布）
+echo 1 > /sys/module/amvideo/parameters/dv_injection_enable
+```
+
+实测 dmesg（连续输出，100 ms 一次）：
+
+```
+dv injection: metadata written to canvas 64
+dv injection: VSIF sent
+dv injection: metadata written to canvas 64
+dv injection: VSIF sent
+```
+
+同时 `hdmi_hdr_status` 从 `HDR10-GAMMA_ST2084` 变为 **`DolbyVision-Std`**。
+
+### 4.3.5 尚未确认的部分（不要当成已完成）
+
+| 项 | 状态 |
+|---|---|
+| dmesg 出现 canvas 写入 + VSIF 发送 | ✅ 已验证 |
+| 电视出现 Dolby Vision 标识 | ⏳ **未确认** |
+| 画面颜色/亮度正确 | ⏳ **未确认** |
+| 元数据随帧变化（动态 DV） | ⏳ 未做（目前只灌静态一帧） |
+
+原因：手上的 DV 样片只有 **3 秒**（`/storage/dv-3s.mkv`，7,423,379 B，31 Mbps），
+来不及观察电视反应。**下一步需要 ≥30 秒的 DV 样片。**
+
+### 4.3.6 这一轮踩到的坑（写给以后的自己）
+
+1. **别拿盒子自己的状态当成功证据**：EMP 路径下 `send_emp` 返回 0、
+   `hdmi_hdr_status` 显示 `DolbyVision-Std`，但电视完全没有反应。
+2. **注入必须在播放中打开**：GUI 画面是 1080p60，此时写 canvas 会把桌面顶部像素改坏。
+3. **EMP 状态会 latching**：关掉 `dv_injection_enable` 后 `hdmi_hdr_status` 仍是
+   `DolbyVision-Std`，颜色异常；要重设 HDMI 模式或重启 Kodi 才能清掉。
+4. **kernel-only 替换后首次上电可能不启动**：断电重新上电即可（本机实测过一次）。
+5. **盒子无线只有约 30 KB/s**：样片走 U 盘，别走网络。
+6. **4.9 里 `update_vframe_src_fmt()` 普通播放不调用**：参考实现靠它取 SEI，
+   在本内核上要靠定时器周期写入（见 4.2）。
+
 ## 5. 启用步骤（实机）
 
 ```sh
