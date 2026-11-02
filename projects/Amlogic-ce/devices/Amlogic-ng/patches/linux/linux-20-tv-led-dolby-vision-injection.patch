@@ -79,10 +79,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..7777777777
+index 0000000000..8888888888
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2064 @@
+@@ -0,0 +1,2076 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -892,13 +892,13 @@ index 0000000000..7777777777
 +	vsif.vers.ver2.dobly_vision_signal = 1;	/* DV STD */
 +	vsif.vers.ver2.low_latency = 0;
 +
-+	/* The author's driver maps RGB_8BIT to YUV422 + 12-bit output, but the
-+	 * 4.9 driver maps RGB_8BIT to YUV444 + 8-bit (COLORDEPTH_24B).  The DM
-+	 * rides in the low bits of 12-bit samples, so ask for the tunnel mode
-+	 * that this driver turns into 422/36-bit: YUV422_BIT12.
++	/* Keep the author's tunnel declaration (RGB 8-bit, AVI stays RGB/FULL).
++	 * The physical transport is forced to 422/12-bit inside the driver for
++	 * the injection path - swapping the enum here would also change the AVI
++	 * declaration, which is not what the reference does.
 +	 */
 +	vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_DOLBYVISION,
-+					      YUV422_BIT12, &vsif, false);
++					      RGB_8BIT, &vsif, false);
 +	dv_injection_log(2, "dv injection: VSIF sent\n");
 +	return 0;
 +}
@@ -2046,6 +2046,18 @@ index 0000000000..7777777777
 +}
 +EXPORT_SYMBOL(dv_injection_note_osd_activity);
 +
++
++/*
++ * The 4.9 HDMI driver maps RGB_8BIT to YUV444/8-bit, while the reference maps
++ * it to YUV422/12-bit.  The driver asks this to force the physical transport
++ * for the injection path only, keeping the AVI declaration as RGB.
++ */
++bool dv_injection_force_422_12(void)
++{
++	return READ_ONCE(dv_injection_enable) && READ_ONCE(dv_injection_active);
++}
++EXPORT_SYMBOL(dv_injection_force_422_12);
++
 +bool dv_injection_block_hdr10(void)
 +{
 +	bool has_metadata = READ_ONCE(dv_injection_active);
@@ -2190,12 +2202,56 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  	return 0;
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
+@@ -49,6 +49,9 @@
+ 
+ #include <linux/amlogic/cpu_version.h>
+ #include <linux/amlogic/media/vout/vinfo.h>
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++#include <linux/amlogic/media/video_sink/dv_injection.h>
++#endif
+ #include <linux/amlogic/media/vout/vout_notify.h>
+ #ifdef CONFIG_AMLOGIC_SND_SOC
+ #include <linux/amlogic/media/sound/aout_notify.h>
+@@ -686,7 +689,15 @@
+ 				int cs = para->cs;
+ 				switch (hdev->hdmi_current_tunnel_mode) {
+ 					case RGB_8BIT:
+-					case RGB_10_12BIT:
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++						/* Reference maps RGB_8BIT to 422 for
++						 * the transport, keeping AVI as RGB.
++						 */
++						if (dv_injection_force_422_12()) {
++							para->cs = COLORSPACE_YUV422;
++							break;
++						}
++#endif
+ 						para->cs = COLORSPACE_YUV444;
+ 						break;
+ 					case RGB_10_12BIT:
+@@ -721,6 +732,13 @@
+ 				int cd = para->cd;
+ 				switch (hdev->hdmi_current_tunnel_mode) {
+ 					case RGB_8BIT:
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++						/* 12-bit components carry the DM bits. */
++						if (dv_injection_force_422_12()) {
++							para->cd = COLORDEPTH_36B;
++							break;
++						}
++#endif
+ 							para->cd = COLORDEPTH_24B;
+ 						break;
+ 					case RGB_10_12BIT:
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..2222222222
+index 0000000000..9999999999
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,25 @@
+@@ -0,0 +1,26 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -2215,6 +2271,7 @@ index 0000000000..2222222222
 +void dv_injection_process_frame(struct vframe_s *vf);
 +bool dv_injection_render_frame(struct vframe_s *vf);
 +bool dv_injection_block_hdr10(void);
++bool dv_injection_force_422_12(void);
 +void dv_injection_note_osd_activity(void);
 +
 +/* hand over the raw DM metadata bytes (user space / Kodi) */

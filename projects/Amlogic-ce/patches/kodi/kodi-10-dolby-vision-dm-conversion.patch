@@ -22,3 +22,29 @@
  
        // make sure we do not leak the existing m_hints.extradata
        m_hints.extradata = {};
+--- a/xbmc/utils/BitstreamConverter.cpp
++++ b/xbmc/utils/BitstreamConverter.cpp
+@@ -1841,12 +1841,23 @@
+ 
+   if (m_convert_dovi && header->guessed_profile == 7)
+   {
++    /* Profile 7 gets the reference's mode 2 conversion. */
+     ret = dovi_convert_rpu_with_mode(rpu, 2);
+     if (ret < 0)
+       goto done;
+ 
+     processed = true;
+   }
++  else if (m_convert_dovi && (header->guessed_profile == 5 ||
++                              header->guessed_profile == 8))
++  {
++    /* Profiles 5 and 8 have their own DM already: do NOT convert (mode 2
++     * would rewrite the colour interpretation to 8.1 while the decoded
++     * pixels stay as they are).  Only mark them processed so the fork's
++     * writer serialises the original DM for the kernel packetizer.
++     */
++    processed = true;
++  }
+ 
+   if (m_setDoviZeroLevel5)
+   {
