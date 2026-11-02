@@ -79,7 +79,7 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..3333333333
+index 0000000000..4444444444
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
 @@ -0,0 +1,1984 @@
@@ -436,11 +436,11 @@ index 0000000000..3333333333
 +MODULE_PARM_DESC(packet_repeat, "\n how often every packet is repeated\n");
 +
 +static bool always_send_vsif = true;
-+/* The reference packetizer does not require 12 bit 4:2:2.  Keep the
-+ * strict check by default, but allow matching the author's wider
-+ * input coverage when a stream is rejected here.
++/* The reference packetizer does not require 12 bit 4:2:2, so this extra
++ * field check is OFF by default and only enabled as an explicit diagnostic.
++ * Length, extension-block and memory bounds checks are always enforced.
 + */
-+static bool strict_dm_format = true;
++static bool strict_dm_format;
 +module_param(strict_dm_format, bool, 0644);
 +MODULE_PARM_DESC(strict_dm_format, "\n require 12 bit 4:2:2 DM signalling\n");
 +module_param(always_send_vsif, bool, 0644);
