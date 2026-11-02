@@ -53,10 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..dddd0ddd0dd0
+index 0000000000..eeee0eee0ee0
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1763 @@
+@@ -0,0 +1,1765 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -751,9 +751,11 @@ index 0000000000..dddd0ddd0dd0
 +		dv_injection_release_output();
 +		return false;
 +	}
-+	if (always_send_vsif &&
-+	    vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_DOLBYVISION,
-+						  RGB_8BIT, NULL, false)) {
++	/* Must carry the Dolby Vision signal bit: fresh_tx_vsif_pkt also accepts
++	 * NULL, but then nothing tells the sink that this is DV, which is exactly
++	 * the difference between "HDMI status says DV" and the TV switching.
++	 */
++	if (always_send_vsif && dv_injection_send_vsif(vinfo)) {
 +		dv_injection_release_output();
 +		return false;
 +	}
