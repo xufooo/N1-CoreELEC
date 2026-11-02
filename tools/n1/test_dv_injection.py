@@ -66,9 +66,13 @@ static bool dv_injection_enable, dv_injection_active, dv_inj_ready;
 static unsigned dm_metadata_size, dv_injection_path;
 static bool always_send_vsif = true;
 static int dv_injection_lock;
-struct dv_inj_slot { bool valid; u8 num_pkts; u32 generation; u32 seq;
+struct dv_inj_slot { bool valid; u8 num_pkts; u32 generation;
                      u32 pixel_data[5][1024]; };
 static struct dv_inj_slot dv_inj_pool[64];
+static struct dv_inj_slot dv_inj_display_snapshot;
+static int dv_inj_publish_lock;
+#define spin_lock_irqsave(l, f) do { (void)(l); (f) = 0; } while (0)
+#define spin_unlock_irqrestore(l, f) do { (void)(l); (void)(f); } while (0)
 static struct dv_inj_slot dv_inj_static_slot;
 #define VFRAME_SIGNAL_FMT_DOVI 4
 #define EOTF_T_DOLBYVISION 1

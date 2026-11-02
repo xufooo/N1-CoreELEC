@@ -79,10 +79,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..8888888888
+index 0000000000..aaaa1111aaaa
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2076 @@
+@@ -0,0 +1,2090 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -345,17 +345,19 @@ index 0000000000..8888888888
 +	bool valid;
 +	u8 num_pkts;
 +	u32 generation;
-+	/* F4: publish protocol.  The decoder bumps seq to an odd value while it
-+	 * rewrites the buffer and back to even when done; the display interrupt
-+	 * is lock free and simply discards a frame whose seq moved or is odd.
-+	 */
-+	u32 seq;
 +	u32 pixel_data[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_PIXELS_PER_PKT];
 +};
 +
 +static struct dv_inj_slot dv_inj_pool[DV_INJ_POOL_SIZE];
 +static struct dv_inj_slot dv_inj_static_slot;
 +static u32 dv_inj_generation;
++/* F4: every slot publication (decode, invalidate, disable) and the display
++ * side's copy into its own snapshot take this one lock.  The interrupt only
++ * copies into the snapshot, so a frame is fully old, fully new or rejected -
++ * never half of each - and no OSD write happens before the check passes.
++ */
++static DEFINE_SPINLOCK(dv_inj_publish_lock);
++static struct dv_inj_slot dv_inj_display_snapshot;
 +/* Fixed 117 byte DM template carrying matrix/signal fields and the
 + * L1/L5/L9/L11/L254 blocks; only the luminance fields are rewritten.
 + * Taken from the reference: an all-zero buffer has no extension block,
@@ -974,14 +976,11 @@ index 0000000000..8888888888
 +static bool dv_injection_render_slot(struct dv_inj_slot *slot)
 +{
 +	const struct vinfo_s *vinfo;
-+	u32 seq;
++	struct dv_inj_slot *snap = &dv_inj_display_snapshot;
++	unsigned long flags;
++	bool ok;
 +
-+	if (!slot || !READ_ONCE(slot->valid) || !READ_ONCE(dv_inj_rt.ready))
-+		return false;
-+	if (slot->generation != READ_ONCE(dv_inj_generation))
-+		return false;
-+	/* Odd seq means the decoder is rewriting this slot right now. */
-+	if (READ_ONCE(slot->seq) & 1)
++	if (!slot || !READ_ONCE(dv_injection_enable))
 +		return false;
 +	vinfo = get_current_vinfo();
 +	if (!vinfo || !vinfo->vout_device ||
@@ -990,21 +989,25 @@ index 0000000000..8888888888
 +	    vinfo->vout_device->dv_info->ieeeoui != 0x00d046)
 +		return false;
 +
-+	seq = READ_ONCE(slot->seq);
-+	if (dv_injection_copy_pixels(slot)) {
++	/* Take a consistent private copy first: the decoder may be rewriting the
++	 * slot, and nothing may be written into the OSD before this check passes.
++	 */
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	ok = READ_ONCE(slot->valid) && READ_ONCE(dv_inj_rt.ready) &&
++	     slot->generation == READ_ONCE(dv_inj_generation);
++	if (ok) {
++		memcpy(snap->pixel_data, slot->pixel_data,
++		       sizeof(snap->pixel_data));
++		snap->num_pkts = slot->num_pkts;
++	}
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	if (!ok)
++		return false;
++
++	if (dv_injection_copy_pixels(snap)) {
 +		dv_injection_release_output();
 +		return false;
 +	}
-+	/* If the decoder touched this slot while we were copying, the frame we
-+	 * just wrote is a mix of two metadata sets: drop it. */
-+	if (READ_ONCE(slot->seq) != seq) {
-+		dv_injection_output_seen_bad_frame();
-+		return false;
-+	}
-+	/* Must carry the Dolby Vision signal bit: fresh_tx_vsif_pkt also accepts
-+	 * NULL, but then nothing tells the sink that this is DV, which is exactly
-+	 * the difference between "HDMI status says DV" and the TV switching.
-+	 */
 +	if (always_send_vsif && dv_injection_send_vsif(vinfo)) {
 +		dv_injection_release_output();
 +		return false;
@@ -1076,6 +1079,7 @@ index 0000000000..8888888888
 +{
 +	struct kernel_param temporary = *kp;
 +	bool enabled;
++	unsigned long flags;
 +	int ret;
 +
 +	temporary.arg = &enabled;
@@ -1106,7 +1110,9 @@ index 0000000000..8888888888
 +	*(bool *)kp->arg = false;
 +	dv_injection_deactivate();
 +	WRITE_ONCE(dv_inj_rt.ready, false);
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	mutex_unlock(&dv_injection_lock);
 +	cancel_delayed_work_sync(&dv_inj_watchdog);
 +	return 0;
@@ -1942,6 +1948,7 @@ index 0000000000..8888888888
 +	u16 payload_len;
 +	const u8 *payload;
 +	struct dv_inj_slot *slot;
++	unsigned long flags;
 +
 +	if (!vf || !READ_ONCE(dv_injection_enable))
 +		return;
@@ -1960,8 +1967,10 @@ index 0000000000..8888888888
 +		if (!generate_DV_from_hdr10p || !hdr10p_sei) {
 +			/* F5: a frame without metadata must not keep an old slot
 +			 * alive for this decoder index. */
++			spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +			WRITE_ONCE(dv_inj_pool[vf->index &
 +					      (DV_INJ_POOL_SIZE - 1)].valid, false);
++			spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +			return;
 +		}
 +		dv_injection_log(1, "dv injection: building DV metadata from HDR10+\n");
@@ -1979,8 +1988,10 @@ index 0000000000..8888888888
 +	}
 +
 +	if (dv_injection_validate_metadata(payload, payload_len)) {
++		spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +		WRITE_ONCE(dv_inj_pool[vf->index &
 +				      (DV_INJ_POOL_SIZE - 1)].valid, false);
++		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +		return;
 +	}
 +
@@ -1992,19 +2003,22 @@ index 0000000000..8888888888
 +		auto_set_L1((u8 *)payload);
 +
 +	slot = &dv_inj_pool[vf->index & (DV_INJ_POOL_SIZE - 1)];
++	/* Build the frame in private state first, publish it atomically after. */
 +	mutex_lock(&dv_injection_lock);
 +	dm_packet.num_pkts = 0;
-+	WRITE_ONCE(slot->seq, READ_ONCE(slot->seq) + 1);	/* odd: writing */
 +	if (!dv_injection_pack_bytes(dm_packet.byte_data,
 +				     &dm_packet.num_pkts, payload, payload_len)) {
 +		dv_injection_expand_pixels(dm_packet.byte_data,
 +					   dm_packet.num_pkts,
-+					   slot->pixel_data);
++					   dm_packet.pixel_data);
++		spin_lock_irqsave(&dv_inj_publish_lock, flags);
++		memcpy(slot->pixel_data, dm_packet.pixel_data,
++		       sizeof(slot->pixel_data));
 +		slot->num_pkts = dm_packet.num_pkts;
 +		slot->generation = READ_ONCE(dv_inj_generation);
 +		WRITE_ONCE(slot->valid, true);
++		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	}
-+	WRITE_ONCE(slot->seq, READ_ONCE(slot->seq) + 1);	/* even: done */
 +	mutex_unlock(&dv_injection_lock);
 +}
 +
