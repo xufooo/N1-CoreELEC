@@ -75,6 +75,7 @@ static struct dv_inj_slot dv_inj_static_slot;
 #define DV_INJ_POOL_SIZE 64
 struct vframe_s { unsigned index; struct { int fmt; } src_fmt; };
 static unsigned int vdr_dm_data_source;
+static bool force_block_other_vsif_for_DV, auto_block_other_vsif_for_DV = true;
 static u32 dv_inj_generation = 1;
 struct dv_inj_runtime { bool ready; void *base; u32 page_bytes; u32 pages; };
 static struct dv_inj_runtime dv_inj_rt;
@@ -231,7 +232,8 @@ class KernelInjectionTests(unittest.TestCase):
         names = ("dv_injection_block_length", "dv_injection_validate_metadata",
                  "dv_injection_canvas_layout", "dv_injection_deactivate",
                  "dv_injection_render_slot", "dv_injection_enable_set",
-                 "dv_injection_block_hdr10", "dv_injection_render_frame")
+                 "should_block_vsif", "dv_injection_block_hdr10",
+                 "dv_injection_render_frame")
         # Locate the definition, not the forward declaration.
         text = text.replace("static int dv_injection_enable_set(const char *val, const struct kernel_param *kp);", "")
         cfile = Path(cls.temp.name) / "contracts.c"

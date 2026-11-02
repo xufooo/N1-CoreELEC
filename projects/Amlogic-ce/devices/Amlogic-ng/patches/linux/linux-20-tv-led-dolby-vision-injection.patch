@@ -53,10 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..6666666666
+index 0000000000..7777777777
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1216 @@
+@@ -0,0 +1,1234 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -1176,9 +1176,27 @@ index 0000000000..6666666666
 + * against our VSIF and leaves the sink in HDR10 (measured: the HDMI
 + * status flipped between HDR10 and DolbyVision-Std once per second).
 + */
++
++/* ---- other-source arbitration, ported from the reference ---- */
++static bool force_block_other_vsif_for_DV;
++module_param(force_block_other_vsif_for_DV, bool, 0664);
++MODULE_PARM_DESC(force_block_other_vsif_for_DV, "\n always block other VSIF sources\n");
++
++static bool auto_block_other_vsif_for_DV = true;
++module_param(auto_block_other_vsif_for_DV, bool, 0664);
++MODULE_PARM_DESC(auto_block_other_vsif_for_DV, "\n block other VSIF sources while DV metadata is present\n");
++
++static bool should_block_vsif(bool dv_metadata)
++{
++	return force_block_other_vsif_for_DV ||
++	       (auto_block_other_vsif_for_DV && dv_metadata);
++}
++
 +bool dv_injection_block_hdr10(void)
 +{
-+	return READ_ONCE(dv_injection_active) && READ_ONCE(dv_injection_enable);
++	bool has_metadata = READ_ONCE(dv_injection_active);
++
++	return READ_ONCE(dv_injection_enable) && should_block_vsif(has_metadata);
 +}
 +EXPORT_SYMBOL(dv_injection_block_hdr10);
 +
