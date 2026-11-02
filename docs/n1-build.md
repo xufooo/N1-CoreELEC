@@ -6,11 +6,11 @@ compile a firmware. Target `image` produces USB firmware. Runs are manual;
 there is no scheduled build and no automatic release publication.
 
 N1 `image` delivery produces only the USB `.img.gz`, its SHA256 sums and
-build evidence. It does not create or upload an update `.tar`. An optional
-`kernel_run_id` input gates an image build on a successful kernel run and
-checks that the kernel source/configuration inputs have not changed.
-The workflow's concurrency queue lets the current kernel job finish first;
-if it fails, the dependent image job fails before compilation.
+build evidence. It does not create or upload an update `.tar`.
+The default target is `kernel`. Compilation success is not device acceptance:
+test the kernel on the device first, then build the full USB image only after
+the user confirms that the device test passed. Do not queue an image job in
+advance or treat a successful kernel CI run as that confirmation.
 
 On a supported non-root Linux x86_64 build host with CoreELEC dependencies:
 
