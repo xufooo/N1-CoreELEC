@@ -8,9 +8,14 @@ on:
         type: choice
         options: [audit, image, toolchain, kernel]
         default: image
+      kernel_run_id:
+        description: Optional successful kernel run required before this image build
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: n1-build-${{ github.ref }}
@@ -26,6 +31,19 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - name: Verify prerequisite kernel build
+        if: inputs.target == 'image' && inputs.kernel_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N1_KERNEL_RUN_ID: ${{ inputs.kernel_run_id }}
+        run: |
+          [[ "$N1_KERNEL_RUN_ID" =~ ^[0-9]+$ ]]
+          mkdir -p output/kernel-prerequisite
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$N1_KERNEL_RUN_ID" > output/kernel-prerequisite-run.json
+          gh run download "$N1_KERNEL_RUN_ID" -R "$GITHUB_REPOSITORY" \
+            -n "n1-build-evidence-$N1_KERNEL_RUN_ID" -D output/kernel-prerequisite
+          python3 tools/n1/check_kernel_prerequisite.py output/kernel-prerequisite-run.json \
+            output/kernel-prerequisite/source-manifest.json
       - name: Prepare hosted runner
         run: |
           test "$GITHUB_ACTIONS" = true
@@ -71,7 +89,7 @@ jobs:
         run: bash tools/n1/build.sh "$BUILD_TARGET"
       - name: Verify firmware contents
         if: success() && inputs.target == 'image'
-        run: python3 tools/n1/verify_image.py target
+        run: python3 tools/n1/verify_image.py target --image-only
       - name: Save source cache
         if: always()
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -98,8 +116,7 @@ jobs:
           name: n1-21.3-usb-baseline-${{ github.run_id }}
           path: |
             target/*Phicomm_N1.img.gz
-            target/*.tar
-            target/*.sha256
+            target/SHA256SUMS.sha256
             output/source-manifest.json
           if-no-files-found: error
           retention-days: 30

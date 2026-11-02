@@ -341,15 +341,19 @@ if [ "${1}" = "release" -o "${1}" = "mkimage" -o "${1}" = "noobs" ]; then
   mkdir -p ${TARGET_IMG}
 
   # Remove any previously created release tarballs
-  rm -rf ${TARGET_IMG}/${IMAGE_NAME}.tar
+  rm -f ${TARGET_IMG}/${IMAGE_NAME}.tar ${TARGET_IMG}/${IMAGE_NAME}.tar.sha256
 
-  # Create release tarball
-  tar cf ${TARGET_IMG}/${IMAGE_NAME}.tar -C target ${IMAGE_NAME}
+  # N1 USB-only delivery still uses RELEASE_DIR to build the disk image.
+  # Skip only the independent update tarball, not image staging.
+  if [[ "${N1_BUILD}" != "yes" || "${N1_IMAGE_ONLY}" != "yes" || "${1}" != "mkimage" ]]; then
+    # Create release tarball
+    tar cf ${TARGET_IMG}/${IMAGE_NAME}.tar -C target ${IMAGE_NAME}
 
-  # Create sha256 checksum of tarball
-  ( cd ${TARGET_IMG}
-    sha256sum ${IMAGE_NAME}.tar > ${IMAGE_NAME}.tar.sha256
-  )
+    # Create sha256 checksum of tarball
+    ( cd ${TARGET_IMG}
+      sha256sum ${IMAGE_NAME}.tar > ${IMAGE_NAME}.tar.sha256
+    )
+  fi
 
   # Create image files if requested
   if [[ ( "${1}" = "noobs" || "${1}" = "mkimage" ) && -n "${BOOTLOADER}" ]]; then

@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 import struct
 import subprocess
-import sys
 import tarfile
+import argparse
 import tempfile
 
 
@@ -15,11 +15,12 @@ def run(*args):
     return subprocess.check_output(args)
 
 
-def verify(target):
+def verify(target, image_only=False):
     images = list(target.glob('*Phicomm_N1.img.gz'))
     archives = list(target.glob('*.tar'))
-    if len(images) != 1 or len(archives) != 1:
-        raise ValueError(f'Expected one N1 image and one update archive: {images}, {archives}')
+    expected_archives = 0 if image_only else 1
+    if len(images) != 1 or len(archives) != expected_archives:
+        raise ValueError(f'Expected one N1 image and {expected_archives} update archives: {images}, {archives}')
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         image = tmp / 'disk.img'
@@ -57,15 +58,16 @@ def verify(target):
                    'usr/lib/udev/hwdb.d/70-local-keyboard.hwdb').decode()
         if 'evdev:input:b0005v0416p0300*\n KEYBOARD_KEY_c0041=enter' not in hwdb:
             raise ValueError('Missing built-in YYYKQ remote confirm-key mapping')
-        with tarfile.open(archives[0]) as archive:
-            names = archive.getnames()
-            for suffix in ('/target/KERNEL', '/target/SYSTEM', '/3rdparty/bootloader/uInitrd',
-                           '/3rdparty/bootloader/s905_autoscript', '/3rdparty/bootloader/Phicomm_N1_boot.ini',
-                           '/3rdparty/bootloader/Phicomm_N1_dtb.img'):
-                if not any(n.endswith(suffix) for n in names):
-                    raise ValueError(f'Update archive missing {suffix}')
+        if not image_only:
+            with tarfile.open(archives[0]) as archive:
+                names = archive.getnames()
+                for suffix in ('/target/KERNEL', '/target/SYSTEM', '/3rdparty/bootloader/uInitrd',
+                               '/3rdparty/bootloader/s905_autoscript', '/3rdparty/bootloader/Phicomm_N1_boot.ini',
+                               '/3rdparty/bootloader/Phicomm_N1_dtb.img'):
+                    if not any(n.endswith(suffix) for n in names):
+                        raise ValueError(f'Update archive missing {suffix}')
         checksums = []
-        for path in (images[0], archives[0]):
+        for path in [images[0], *archives]:
             with path.open('rb') as src:
                 digest = hashlib.file_digest(src, 'sha256').hexdigest() if hasattr(hashlib, 'file_digest') else None
             if digest is None:
@@ -78,10 +80,15 @@ def verify(target):
         (target / 'SHA256SUMS.sha256').write_text(''.join(checksums))
         Path('output/firmware-verification.json').write_text(json.dumps({
             'packed_image_verified': True, 'dt_id': dt_id,
+            'update_archive_requested': not image_only,
             'device_boot_tested': False, 'playback_tested': False,
         }, indent=2) + '\n')
-    print('Packed N1 image and update archive verified. Device tests still required.')
+    print('Packed N1 delivery verified. Device tests still required.')
 
 
 if __name__ == '__main__':
-    verify(Path(sys.argv[1] if len(sys.argv) > 1 else 'target'))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('target', nargs='?', type=Path, default=Path('target'))
+    parser.add_argument('--image-only', action='store_true')
+    args = parser.parse_args()
+    verify(args.target, image_only=args.image_only)

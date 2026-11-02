@@ -5,11 +5,18 @@ patch stack, NTFS package hooks, DTB and U-Boot script compilation; it does not
 compile a firmware. Target `image` produces USB firmware. Runs are manual;
 there is no scheduled build and no automatic release publication.
 
+N1 `image` delivery produces only the USB `.img.gz`, its SHA256 sums and
+build evidence. It does not create or upload an update `.tar`. An optional
+`kernel_run_id` input gates an image build on a successful kernel run and
+checks that the kernel source/configuration inputs have not changed.
+The workflow's concurrency queue lets the current kernel job finish first;
+if it fails, the dependent image job fails before compilation.
+
 On a supported non-root Linux x86_64 build host with CoreELEC dependencies:
 
 ```sh
 bash tools/n1/build.sh image
-python3 tools/n1/verify_image.py target
+python3 tools/n1/verify_image.py target --image-only
 ```
 
 The image build retains source/compiler caches, uses the upstream package
@@ -20,8 +27,6 @@ explicit allowlist. No user disks or running device are touched.
 Artifacts:
 
 - `*Phicomm_N1.img.gz`: new USB installation on a **different** USB stick.
-- `*.tar`: update candidate for this fork after validation; not a supported
-  in-place migration from the user's 3.14-based 9.2.7 installation.
 - SHA256 sums and source manifest.
 - Build logs and firmware-content verification result.
 

@@ -11,6 +11,7 @@ test "$(uname -s)" = Linux || { echo 'Build requires a Linux host.' >&2; exit 1;
 test "$(id -u)" != 0 || { echo 'Do not build as root.' >&2; exit 1; }
 
 export PROJECT=Amlogic-ce DEVICE=Amlogic-ng ARCH=arm N1_BUILD=yes
+export N1_IMAGE_ONLY=yes
 export CCACHE_DIR="$PWD/.ccache" AUTOREMOVE=yes
 export THREADCOUNT=2 CONCURRENCY_MAKE_LEVEL=4 CONCURRENCY_LOAD=6
 export CUSTOM_VERSION=21.3-Omega-N1-r1
@@ -33,6 +34,7 @@ manifest = {
     'project': 'Amlogic-ce', 'device': 'Amlogic-ng', 'board': 'Phicomm_N1',
     'variant': 'baseline-with-default-off-dv-experiment', 'dolby_vision_patches': True,
     'build_target': os.environ['N1_REQUESTED_TARGET'],
+    'update_archive_requested': False,
     'build_status': 'running', 'kernel_compiled': False,
     'dolby_vision_patch_stack': ['linux-20-tv-led-dolby-vision-injection.patch'],
     'dolby_vision_variant': 'manual-hdmi-dm-injection-experiment',
