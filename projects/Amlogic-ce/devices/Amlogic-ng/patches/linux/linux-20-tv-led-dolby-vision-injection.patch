@@ -53,10 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..7777777777
+index 0000000000..8888888888
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1234 @@
+@@ -0,0 +1,1374 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -155,6 +155,7 @@ index 0000000000..7777777777
 +static struct dv_inj_slot dv_inj_pool[DV_INJ_POOL_SIZE];
 +static struct dv_inj_slot dv_inj_static_slot;
 +static u32 dv_inj_generation;
++static u8 dv_inj_hdr10p_dm[HDR10PLUS_DV_PAYLOAD_SIZE];
 +
 +/*
 + * Resolved OSD canvas, computed in process context when injection is
@@ -1129,6 +1130,129 @@ index 0000000000..7777777777
 +    return payload_size;
 +}
 +
++
++/* ---- HDR10+ -> DV generation, ported from the reference ---- */
++static bool generate_DV_from_hdr10p = true;
++module_param(generate_DV_from_hdr10p, bool, 0664);
++MODULE_PARM_DESC(generate_DV_from_hdr10p, "\n create DV metadata from HDR10+ SEI\n");
++
++#define HDR10PLUS_DV_PAYLOAD_SIZE 117
++
++static void form_dv_sei_payload_from_hdr10plus(uint8_t *hdr10p_sei_payload, uint16_t payload_size, uint8_t* dm_metadata, uint32_t max_display_mastering_luminance, uint32_t min_display_mastering_luminance){
++    struct vframe_hdr_plus_sei hdr_plus_data;
++	uint8_t i;
++
++    memset(&hdr_plus_data, 0, sizeof(struct vframe_hdr_plus_sei));
++    parser_hdr10_plus_metadata(hdr10p_sei_payload, payload_size, &hdr_plus_data);
++
++    // max_pq
++    uint16_t max_distribution_maxrgb_percentiles = 0;
++    for(i = 0; i < hdr_plus_data.num_distribution_maxrgb_percentiles[0]; i++){
++        if(hdr_plus_data.distribution_maxrgb_percentiles[0][i] > max_distribution_maxrgb_percentiles){
++            max_distribution_maxrgb_percentiles = hdr_plus_data.distribution_maxrgb_percentiles[0][i];
++        }
++    }
++    uint16_t max_pq = pq_lookup[max_distribution_maxrgb_percentiles];
++
++    // avg_pq
++    uint16_t avg_pq = pq_lookup[hdr_plus_data.average_maxrgb[0]];
++
++    // min_pq
++    uint16_t min_pq = 0;
++
++    // L1 fix
++    uint16_t L1_min_pq = min_pq;
++    uint16_t L1_max_pq = clamp16(max_pq, (uint16_t) L1_MAX_PQ_MIN_VALUE, (uint16_t) L1_MAX_PQ_MAX_VALUE);
++    uint16_t L1_avg_pq = clamp16(avg_pq, (uint16_t) L1_AVG_PQ_MIN_VALUE_CMV40, L1_max_pq - 1);
++
++	dv_injection_log(1, "L1_min_pq from HDR10+ is: %d\n", L1_min_pq);
++	dv_injection_log(1, "L1_max_pq from HDR10+ is: %d\n", L1_max_pq);
++	dv_injection_log(1, "L1_avg_pq from HDR10+ is: %d\n", L1_avg_pq);
++
++    // Set L1 
++    extension_block ext_block;
++	ext_block.level = 1;
++    DoviExtMetadataBlockLevel1 L1;
++
++    find_ext_block(&ext_block, dm_metadata);
++    get_L1(&L1, &ext_block);
++    L1.min_pq = L1_min_pq;
++    L1.max_pq = L1_max_pq;
++    L1.avg_pq = L1_avg_pq;
++    set_L1(&L1, &ext_block);
++
++    // Set source display info
++    // min
++    uint16_t source_min_pq;
++    if(min_display_mastering_luminance == 0){
++        source_min_pq = 0;
++    } else if (min_display_mastering_luminance == 1){
++        source_min_pq = 7;
++    } else if (min_display_mastering_luminance == 10){
++        source_min_pq = 19;
++    } else if (min_display_mastering_luminance == 20){
++        source_min_pq = 38;
++    } else if (min_display_mastering_luminance == 50){
++        source_min_pq = 62;
++    } else {
++        source_min_pq = 0;
++    }
++    dm_metadata[SOURCE_MIN_PQ_OFFSET] = source_min_pq >> 8;
++    dm_metadata[SOURCE_MIN_PQ_OFFSET + 1] = source_min_pq & 0xFF;
++
++    // max
++    uint16_t source_max_pq;
++    if(max_display_mastering_luminance == 10000000){
++        source_max_pq = 3079;
++    } else if (max_display_mastering_luminance == 20000000){
++        source_max_pq = 3388;
++    } else if (max_display_mastering_luminance == 40000000){
++        source_max_pq = 3696;
++    } else if (max_display_mastering_luminance == 100000000){
++        source_max_pq = 4095;
++    } else {
++        source_max_pq = 3079;
++    }
++    dm_metadata[SOURCE_MAX_PQ_OFFSET] = source_max_pq >> 8;
++    dm_metadata[SOURCE_MAX_PQ_OFFSET + 1] = source_max_pq & 0xFF;
++}
++
++
++/* HDR10+ SEI lives in type 0x02000000 blocks carrying an ITU-T T.35 payload
++ * (0xB5 00 3C 00 01 04).  Only used when generating DV metadata for HDR10+
++ * sources with no RPU of their own.
++ */
++#define HDR10P_SEI_TYPE 0x02000000
++static int dv_injection_find_hdr10p_sei(const void *sei_data, u32 sei_size,
++					const u8 **payload, u32 *payload_len)
++{
++	const u8 *p = (const u8 *)sei_data;
++	u32 offset = 0;
++
++	if (!p || !sei_size)
++		return -EINVAL;
++	while (offset + 8 <= sei_size) {
++		u32 size = ((u32)p[0] << 24) | ((u32)p[1] << 16) |
++			   ((u32)p[2] << 8) | p[3];
++		u32 type = ((u32)p[4] << 24) | ((u32)p[5] << 16) |
++			   ((u32)p[6] << 8) | p[7];
++		p += 8;
++		offset += 8;
++		if (offset + size > sei_size)
++			break;
++		if (type == HDR10P_SEI_TYPE && size > 10 &&
++		    p[0] == 0xB5 && p[2] == 0x3C && p[3] == 0x00 &&
++		    p[4] == 0x01 && p[5] == 0x04) {
++			*payload = p;
++			*payload_len = size;
++			return 0;
++		}
++		p += size;
++		offset += size;
++	}
++	return -ENOENT;
++}
++
 +/*
 + * Called from the video sink when a frame updates the source format.  The
 + * timer already drives the injection, so this only makes sure it runs.
@@ -1144,8 +1268,24 @@ index 0000000000..7777777777
 +	if (vf->src_fmt.fmt != VFRAME_SIGNAL_FMT_DOVI)
 +		return;
 +	if (dv_injection_find_dv_sei(vf->src_fmt.sei_ptr, vf->src_fmt.sei_size,
-+				     &payload, &payload_len))
-+		return;
++				     &payload, &payload_len)) {
++		const u8 *h10p = NULL;
++		u32 h10p_len = 0;
++
++		if (!generate_DV_from_hdr10p ||
++		    dv_injection_find_hdr10p_sei(vf->src_fmt.sei_ptr,
++						 vf->src_fmt.sei_size,
++						 &h10p, &h10p_len))
++			return;
++		/* Build a DV payload from the HDR10+ metadata and the mastering
++		 * display luminance, like the reference does. */
++		form_dv_sei_payload_from_hdr10plus((u8 *)h10p, (u16)h10p_len,
++						   dv_inj_hdr10p_dm,
++						   vf->prop.master_display_colour.luminance[0],
++						   vf->prop.master_display_colour.luminance[1]);
++		payload = dv_inj_hdr10p_dm;
++		payload_len = HDR10PLUS_DV_PAYLOAD_SIZE;
++	}
 +	if (dv_injection_validate_metadata(payload, payload_len))
 +		return;
 +
