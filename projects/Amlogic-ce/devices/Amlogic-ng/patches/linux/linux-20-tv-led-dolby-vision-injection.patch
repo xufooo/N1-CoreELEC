@@ -79,10 +79,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..5555555555
+index 0000000000..6666666666
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1997 @@
+@@ -0,0 +1,2048 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -345,6 +345,11 @@ index 0000000000..5555555555
 +	bool valid;
 +	u8 num_pkts;
 +	u32 generation;
++	/* F4: publish protocol.  The decoder bumps seq to an odd value while it
++	 * rewrites the buffer and back to even when done; the display interrupt
++	 * is lock free and simply discards a frame whose seq moved or is odd.
++	 */
++	u32 seq;
 +	u32 pixel_data[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_PIXELS_PER_PKT];
 +};
 +
@@ -953,13 +958,24 @@ index 0000000000..5555555555
 + * Interrupt context (vsync).  No mutex, no console_lock, no allocation:
 + * only the prepared pixels and the resolved canvas are touched.
 + */
++static unsigned long dv_injection_torn_frames;
++
++static void dv_injection_output_seen_bad_frame(void)
++{
++	WRITE_ONCE(dv_injection_torn_frames, dv_injection_torn_frames + 1);
++}
++
 +static bool dv_injection_render_slot(struct dv_inj_slot *slot)
 +{
 +	const struct vinfo_s *vinfo;
++	u32 seq;
 +
 +	if (!slot || !READ_ONCE(slot->valid) || !READ_ONCE(dv_inj_rt.ready))
 +		return false;
 +	if (slot->generation != READ_ONCE(dv_inj_generation))
++		return false;
++	/* Odd seq means the decoder is rewriting this slot right now. */
++	if (READ_ONCE(slot->seq) & 1)
 +		return false;
 +	vinfo = get_current_vinfo();
 +	if (!vinfo || !vinfo->vout_device ||
@@ -968,8 +984,15 @@ index 0000000000..5555555555
 +	    vinfo->vout_device->dv_info->ieeeoui != 0x00d046)
 +		return false;
 +
++	seq = READ_ONCE(slot->seq);
 +	if (dv_injection_copy_pixels(slot)) {
 +		dv_injection_release_output();
++		return false;
++	}
++	/* If the decoder touched this slot while we were copying, the frame we
++	 * just wrote is a mix of two metadata sets: drop it. */
++	if (READ_ONCE(slot->seq) != seq) {
++		dv_injection_output_seen_bad_frame();
 +		return false;
 +	}
 +	/* Must carry the Dolby Vision signal bit: fresh_tx_vsif_pkt also accepts
@@ -1014,6 +1037,26 @@ index 0000000000..5555555555
 +}
 +EXPORT_SYMBOL(dv_injection_render_frame);
 +
++/*
++ * F6: the display hook only runs when there is a frame on screen.  If
++ * playback stops while injection is on, nothing calls release_output() and
++ * the normal HDR producer stays blocked.  A small watchdog covers the
++ * "stopped, no new frame" case that the frame path cannot see.
++ */
++static struct delayed_work dv_inj_watchdog;
++
++static void dv_inj_watchdog_fn(struct work_struct *work)
++{
++	if (!READ_ONCE(dv_injection_enable))
++		return;
++	if (READ_ONCE(dv_injection_active) && !get_video_enabled()) {
++		mutex_lock(&dv_injection_lock);
++		dv_injection_release_output();
++		mutex_unlock(&dv_injection_lock);
++	}
++	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(1000));
++}
++
 +static int dv_injection_enable_set(const char *val, const struct kernel_param *kp)
 +{
 +	struct kernel_param temporary = *kp;
@@ -1039,6 +1082,8 @@ index 0000000000..5555555555
 +		}
 +		*(bool *)kp->arg = true;
 +		mutex_unlock(&dv_injection_lock);
++		schedule_delayed_work(&dv_inj_watchdog,
++				      msecs_to_jiffies(1000));
 +		return 0;
 +	}
 +
@@ -1048,6 +1093,7 @@ index 0000000000..5555555555
 +	WRITE_ONCE(dv_inj_rt.ready, false);
 +	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
 +	mutex_unlock(&dv_injection_lock);
++	cancel_delayed_work_sync(&dv_inj_watchdog);
 +	return 0;
 +}
 +
@@ -1933,6 +1979,7 @@ index 0000000000..5555555555
 +	slot = &dv_inj_pool[vf->index & (DV_INJ_POOL_SIZE - 1)];
 +	mutex_lock(&dv_injection_lock);
 +	dm_packet.num_pkts = 0;
++	WRITE_ONCE(slot->seq, READ_ONCE(slot->seq) + 1);	/* odd: writing */
 +	if (!dv_injection_pack_bytes(dm_packet.byte_data,
 +				     &dm_packet.num_pkts, payload, payload_len)) {
 +		dv_injection_expand_pixels(dm_packet.byte_data,
@@ -1942,8 +1989,10 @@ index 0000000000..5555555555
 +		slot->generation = READ_ONCE(dv_inj_generation);
 +		WRITE_ONCE(slot->valid, true);
 +	}
++	WRITE_ONCE(slot->seq, READ_ONCE(slot->seq) + 1);	/* even: done */
 +	mutex_unlock(&dv_injection_lock);
 +}
++
 +
 +
 +/*
@@ -2060,6 +2109,7 @@ index 0000000000..5555555555
 +
 +static int __init dv_injection_init(void)
 +{
++	INIT_DELAYED_WORK(&dv_inj_watchdog, dv_inj_watchdog_fn);
 +	dv_inj_generation = 1;
 +	dv_inj_ready = true;
 +	dv_injection_log(1, "dv injection: module loaded\n");
@@ -2068,6 +2118,7 @@ index 0000000000..5555555555
 +
 +static void __exit dv_injection_exit(void)
 +{
++	cancel_delayed_work_sync(&dv_inj_watchdog);
 +	mutex_lock(&dv_injection_lock);
 +	dv_injection_deactivate();
 +	mutex_unlock(&dv_injection_lock);

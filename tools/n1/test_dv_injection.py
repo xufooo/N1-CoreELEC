@@ -66,7 +66,7 @@ static bool dv_injection_enable, dv_injection_active, dv_inj_ready;
 static unsigned dm_metadata_size, dv_injection_path;
 static bool always_send_vsif = true;
 static int dv_injection_lock;
-struct dv_inj_slot { bool valid; u8 num_pkts; u32 generation;
+struct dv_inj_slot { bool valid; u8 num_pkts; u32 generation; u32 seq;
                      u32 pixel_data[5][1024]; };
 static struct dv_inj_slot dv_inj_pool[64];
 static struct dv_inj_slot dv_inj_static_slot;
@@ -77,6 +77,14 @@ struct vframe_s { unsigned index; struct { int fmt; } src_fmt; };
 static unsigned int vdr_dm_data_source;
 static bool force_block_other_vsif_for_DV, auto_block_other_vsif_for_DV = true;
 static bool strict_dm_format = true;
+struct delayed_work { int unused; };
+static struct delayed_work dv_inj_watchdog;
+static void schedule_delayed_work(struct delayed_work *w, unsigned long d) { (void)w; (void)d; }
+static void cancel_delayed_work_sync(struct delayed_work *w) { (void)w; }
+#define INIT_DELAYED_WORK(w, f) do { (void)(w); (void)(f); } while (0)
+static unsigned long dv_injection_torn_frames;
+static void dv_injection_output_seen_bad_frame(void) { dv_injection_torn_frames++; }
+
 static u32 dv_inj_generation = 1;
 struct dv_inj_runtime { bool ready; void *base; u32 page_bytes; u32 pages; };
 static struct dv_inj_runtime dv_inj_rt;
