@@ -15,6 +15,32 @@ index bc9ac74..95845cf 100644
 +		return;
 +#endif
 +
+diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_fb.c
+--- a/drivers/amlogic/media/osd/osd_fb.c
++++ b/drivers/amlogic/media/osd/osd_fb.c
+@@ -28,6 +28,9 @@
+ #include <linux/mutex.h>
+ #include <linux/platform_device.h>
+ #include <linux/fb.h>
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++#include <linux/amlogic/media/video_sink/dv_injection.h>
++#endif
+ #include <linux/spinlock.h>
+ #include <linux/fs.h>
+ #include <linux/sysfs.h>
+@@ -741,6 +744,12 @@
+ 
+ static int osd_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
+ {
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* Dolby Vision injection keeps the active-area handling quiet for a
++	 * while after any OSD operation, like the reference implementation.
++	 */
++	dv_injection_note_osd_activity();
++#endif
+ 	struct osd_fb_dev_s *fbdev = (struct osd_fb_dev_s *)info->par;
+ 	void __user *argp = (void __user *)arg;
+ 	u32 src_colorkey;/* 16 bit or 24 bit */
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
 index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
@@ -53,10 +79,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..ffff0fff0ff0
+index 0000000000..1111111111
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1948 @@
+@@ -0,0 +1,1972 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -110,6 +136,175 @@ index 0000000000..ffff0fff0ff0
 + * implementation): 128 byte packets, CRC32 in the last 4 bytes.
 + */
 +#define HDR10PLUS_DV_PAYLOAD_SIZE 117
++
++/* ---- constants required by the ported HDR10+/L5 code (from the reference) ---- */
++#define DV_SEI 0x01000000
++#define DV_SEI_VDR_HEADER_LENGTH 3
++#define DV_SEI_VDR_HEADER_BYTE_1 0x7C
++#define DV_SEI_VDR_HEADER_BYTE_2 0x01
++#define DV_SEI_VDR_HEADER_BYTE_3 0xFF
++#define DV_SEI_VDR_BODY_MIN_LENGTH 71
++#define SEI_HEADER_SIZE 8
++#define DV_SEI_VDR_MIN_LENGTH (DV_SEI_VDR_HEADER_LENGTH + DV_SEI_VDR_BODY_MIN_LENGTH + SEI_HEADER_SIZE)
++
++#define MAX_METADATA_ROWS_4K 4
++#define MAX_DM_METADATA_SIZE 594
++#define POOL_SIZE 64
++
++#define SOURCE_MIN_PQ_OFFSET 64
++#define SOURCE_MAX_PQ_OFFSET 66
++
++#define L1_MAX_PQ_MAX_VALUE 4095
++#define L1_MIN_PQ_MAX_VALUE 12
++#define L1_MAX_PQ_MIN_VALUE 2081
++#define L1_AVG_PQ_MIN_VALUE 819
++#define L1_AVG_PQ_MIN_VALUE_CMV40 1229
++
++struct vframe_hdr_plus_sei {
++	u16 present_flag;
++	u16 itu_t_t35_country_code;
++	u16 itu_t_t35_terminal_provider_code;
++	u16 itu_t_t35_terminal_provider_oriented_code;
++	u16 application_identifier;
++	u16 application_version;
++	/*num_windows max is 3*/
++	u16 num_windows;
++	/*windows xy*/
++	u16 window_upper_left_corner_x[3];
++	u16 window_upper_left_corner_y[3];
++	u16 window_lower_right_corner_x[3];
++	u16 window_lower_right_corner_y[3];
++	u16 center_of_ellipse_x[3];
++	u16 center_of_ellipse_y[3];
++	u16 rotation_angle[3];
++	u16 semimajor_axis_internal_ellipse[3];
++	u16 semimajor_axis_external_ellipse[3];
++	u16 semiminor_axis_external_ellipse[3];
++	u16 overlap_process_option[3];
++	/*target luminance*/
++	u32 tgt_sys_disp_max_lumi;
++	u16 tgt_sys_disp_act_pk_lumi_flag;
++	u16 num_rows_tgt_sys_disp_act_pk_lumi;
++	u16 num_cols_tgt_sys_disp_act_pk_lumi;
++	u16 tgt_sys_disp_act_pk_lumi[25][25];
++
++	/*num_windows max is 3, e.g maxscl[num_windows][i];*/
++	u32 maxscl[3][3];
++	u32 average_maxrgb[3];
++	u16 num_distribution_maxrgb_percentiles[3];
++	u16 distribution_maxrgb_percentages[3][15];
++	u32 distribution_maxrgb_percentiles[3][15];
++	u16 fraction_bright_pixels[3];
++
++	u16 mast_disp_act_pk_lumi_flag;
++	u16 num_rows_mast_disp_act_pk_lumi;
++	u16 num_cols_mast_disp_act_pk_lumi;
++	u16 mast_disp_act_pk_lumi[25][25];
++	/*num_windows max is 3, e.g knee_point_x[num_windows]*/
++	u16 tone_mapping_flag[3];
++	u16 knee_point_x[3];
++	u16 knee_point_y[3];
++	u16 num_bezier_curve_anchors[3];
++	u16 bezier_curve_anchors[3][15];
++	u16 color_saturation_mapping_flag[3];
++	u16 color_saturation_weight[3];
++};
++
++struct hdr_plus_bits_s {
++	u16 len_itu_t_t35_country_code;
++	u16 len_itu_t_t35_terminal_provider_code;
++	u16 len_itu_t_t35_terminal_provider_oriented_code;
++	u16 len_application_identifier;
++	u16 len_application_version;
++	/*num_windows max is 3*/
++	u16 len_num_windows;
++	/*windows xy*/
++	u16 len_window_upper_left_corner_x;
++	u16 len_window_upper_left_corner_y;
++	u16 len_window_lower_right_corner_x;
++	u16 len_window_lower_right_corner_y;
++	u16 len_center_of_ellipse_x;
++	u16 len_center_of_ellipse_y;
++	u16 len_rotation_angle;
++	u16 len_semimajor_axis_internal_ellipse;
++	u16 len_semimajor_axis_external_ellipse;
++	u16 len_semiminor_axis_external_ellipse;
++	u16 len_overlap_process_option;
++	/*target luminance*/
++	u16 len_tgt_sys_disp_max_lumi;
++	u16 len_tgt_sys_disp_act_pk_lumi_flag;
++	u16 len_num_rows_tgt_sys_disp_act_pk_lumi;
++	u16 len_num_cols_tgt_sys_disp_act_pk_lumi;
++	u16 len_tgt_sys_disp_act_pk_lumi;
++
++	/*num_windows max is 3, e.g maxscl[num_windows][i];*/
++	u16 len_maxscl;
++	u16 len_average_maxrgb;
++	u16 len_num_distribution_maxrgb_percentiles;
++	u16 len_distribution_maxrgb_percentages;
++	u16 len_distribution_maxrgb_percentiles;
++	u16 len_fraction_bright_pixels;
++
++	u16 len_mast_disp_act_pk_lumi_flag;
++	u16 len_num_rows_mast_disp_act_pk_lumi;
++	u16 len_num_cols_mast_disp_act_pk_lumi;
++	u16 len_mast_disp_act_pk_lumi;
++	/*num_windows max is 3, e.g knee_point_x[num_windows]*/
++	u16 len_tone_mapping_flag;
++	u16 len_knee_point_x;
++	u16 len_knee_point_y;
++	u16 len_num_bezier_curve_anchors;
++	u16 len_bezier_curve_anchors;
++	u16 len_color_saturation_mapping_flag;
++	u16 len_color_saturation_weight;
++};
++
++static struct hdr_plus_bits_s sei_md_bits = {
++	.len_itu_t_t35_country_code = 8,
++	.len_itu_t_t35_terminal_provider_code = 16,
++	.len_itu_t_t35_terminal_provider_oriented_code = 16,
++	.len_application_identifier = 8,
++	.len_application_version = 8,
++	.len_num_windows = 2,
++	.len_window_upper_left_corner_x = 16,
++	.len_window_upper_left_corner_y = 16,
++	.len_window_lower_right_corner_x = 16,
++	.len_window_lower_right_corner_y = 16,
++	.len_center_of_ellipse_x = 16,
++	.len_center_of_ellipse_y = 16,
++	.len_rotation_angle = 8,
++	.len_semimajor_axis_internal_ellipse = 16,
++	.len_semimajor_axis_external_ellipse = 16,
++	.len_semiminor_axis_external_ellipse = 16,
++	.len_overlap_process_option = 1,
++	.len_tgt_sys_disp_max_lumi = 27,
++	.len_tgt_sys_disp_act_pk_lumi_flag = 1,
++	.len_num_rows_tgt_sys_disp_act_pk_lumi = 5,
++	.len_num_cols_tgt_sys_disp_act_pk_lumi = 5,
++	.len_tgt_sys_disp_act_pk_lumi = 4,
++	.len_maxscl = 17,
++	.len_average_maxrgb = 17,
++	.len_num_distribution_maxrgb_percentiles = 4,
++	.len_distribution_maxrgb_percentages = 7,
++	.len_distribution_maxrgb_percentiles = 17,
++	.len_fraction_bright_pixels = 10,
++	.len_mast_disp_act_pk_lumi_flag = 1,
++	.len_num_rows_mast_disp_act_pk_lumi = 5,
++	.len_num_cols_mast_disp_act_pk_lumi = 5,
++	.len_mast_disp_act_pk_lumi = 4,
++	.len_tone_mapping_flag = 1,
++	.len_knee_point_x = 12,
++	.len_knee_point_y = 12,
++	.len_num_bezier_curve_anchors = 4,
++	.len_bezier_curve_anchors = 10,
++	.len_color_saturation_mapping_flag = 1,
++	.len_color_saturation_weight = 6
++};
++
++
++
++static unsigned long last_osd_ioctl_time;
++static unsigned int osd_L5_timeout_ms = 3000;
 +#define DV_INJ_NUM_BYTES_PER_PACKET	128
 +#define DV_INJ_CRC_OFFSET		124
 +#define DV_INJ_MAX_NUM_HDR_DM_PACKETS	5
@@ -161,9 +356,14 @@ index 0000000000..ffff0fff0ff0
 + * Taken from the reference: an all-zero buffer has no extension block,
 + * and get_L1() would dereference NULL.
 + */
-+static u8 dv_inj_hdr10p_dm[HDR10PLUS_DV_PAYLOAD_SIZE] = {
++static const u8 dv_inj_hdr10p_template[HDR10PLUS_DV_PAYLOAD_SIZE] = {
 +	0,1,37,102,0,0,53,234,37,102,249,252,235,28,37,102,68,202,0,0,1,0,0,0,8,0,0,0,8,0,0,0,28,54,34,67,1,134,14,70,48,142,5,20,0,0,1,166,62,90,255,255,0,0,0,0,0,0,0,0,12,0,1,1,0,7,12,7,42,42,5,0,0,0,6,1,0,6,12,16,8,111,0,0,0,8,5,0,0,0,0,0,0,0,0,0,0,0,1,9,0,0,0,0,4,11,1,16,0,0,0,0,0,2,254,0,2
 +};
++/* Working copy: rebuilt from the template on every frame, because
++ * modify_L5_data() accumulates margins in AUTO mode - a persistent buffer
++ * would drift frame after frame.
++ */
++static u8 dv_inj_hdr10p_dm[HDR10PLUS_DV_PAYLOAD_SIZE];
 +
 +/*
 + * Resolved OSD canvas, computed in process context when injection is
@@ -840,7 +1040,8 @@ index 0000000000..ffff0fff0ff0
 +
 +
 +/* ---- L1/L5 metadata layer, ported from the reference implementation ---- */
-+static unsigned int L5_adjust_mode = 3; /* 0 removed, 1 original, 2 metadata, 3 auto */
++static int L5_adjust_mode = 3; /* negative disables L5 handling */
++static bool L1_adjust = true;  /* author's L1 handling switch */ /* 0 removed, 1 original, 2 metadata, 3 auto */
 +module_param(L5_adjust_mode, uint, 0644);
 +MODULE_PARM_DESC(L5_adjust_mode, "\n Level 5 active area handling mode\n");
 +
@@ -1147,173 +1348,6 @@ index 0000000000..ffff0fff0ff0
 +}
 +
 +
-+
-+/* ---- constants required by the ported HDR10+/L5 code (from the reference) ---- */
-+#define DV_SEI 0x01000000
-+#define DV_SEI_VDR_HEADER_LENGTH 3
-+#define DV_SEI_VDR_HEADER_BYTE_1 0x7C
-+#define DV_SEI_VDR_HEADER_BYTE_2 0x01
-+#define DV_SEI_VDR_HEADER_BYTE_3 0xFF
-+#define DV_SEI_VDR_BODY_MIN_LENGTH 71
-+#define SEI_HEADER_SIZE 8
-+#define DV_SEI_VDR_MIN_LENGTH (DV_SEI_VDR_HEADER_LENGTH + DV_SEI_VDR_BODY_MIN_LENGTH + SEI_HEADER_SIZE)
-+
-+#define MAX_METADATA_ROWS_4K 4
-+#define MAX_DM_METADATA_SIZE 594
-+#define POOL_SIZE 64
-+
-+#define SOURCE_MIN_PQ_OFFSET 64
-+#define SOURCE_MAX_PQ_OFFSET 66
-+
-+#define L1_MAX_PQ_MAX_VALUE 4095
-+#define L1_MIN_PQ_MAX_VALUE 12
-+#define L1_MAX_PQ_MIN_VALUE 2081
-+#define L1_AVG_PQ_MIN_VALUE 819
-+#define L1_AVG_PQ_MIN_VALUE_CMV40 1229
-+
-+struct vframe_hdr_plus_sei {
-+	u16 present_flag;
-+	u16 itu_t_t35_country_code;
-+	u16 itu_t_t35_terminal_provider_code;
-+	u16 itu_t_t35_terminal_provider_oriented_code;
-+	u16 application_identifier;
-+	u16 application_version;
-+	/*num_windows max is 3*/
-+	u16 num_windows;
-+	/*windows xy*/
-+	u16 window_upper_left_corner_x[3];
-+	u16 window_upper_left_corner_y[3];
-+	u16 window_lower_right_corner_x[3];
-+	u16 window_lower_right_corner_y[3];
-+	u16 center_of_ellipse_x[3];
-+	u16 center_of_ellipse_y[3];
-+	u16 rotation_angle[3];
-+	u16 semimajor_axis_internal_ellipse[3];
-+	u16 semimajor_axis_external_ellipse[3];
-+	u16 semiminor_axis_external_ellipse[3];
-+	u16 overlap_process_option[3];
-+	/*target luminance*/
-+	u32 tgt_sys_disp_max_lumi;
-+	u16 tgt_sys_disp_act_pk_lumi_flag;
-+	u16 num_rows_tgt_sys_disp_act_pk_lumi;
-+	u16 num_cols_tgt_sys_disp_act_pk_lumi;
-+	u16 tgt_sys_disp_act_pk_lumi[25][25];
-+
-+	/*num_windows max is 3, e.g maxscl[num_windows][i];*/
-+	u32 maxscl[3][3];
-+	u32 average_maxrgb[3];
-+	u16 num_distribution_maxrgb_percentiles[3];
-+	u16 distribution_maxrgb_percentages[3][15];
-+	u32 distribution_maxrgb_percentiles[3][15];
-+	u16 fraction_bright_pixels[3];
-+
-+	u16 mast_disp_act_pk_lumi_flag;
-+	u16 num_rows_mast_disp_act_pk_lumi;
-+	u16 num_cols_mast_disp_act_pk_lumi;
-+	u16 mast_disp_act_pk_lumi[25][25];
-+	/*num_windows max is 3, e.g knee_point_x[num_windows]*/
-+	u16 tone_mapping_flag[3];
-+	u16 knee_point_x[3];
-+	u16 knee_point_y[3];
-+	u16 num_bezier_curve_anchors[3];
-+	u16 bezier_curve_anchors[3][15];
-+	u16 color_saturation_mapping_flag[3];
-+	u16 color_saturation_weight[3];
-+};
-+
-+struct hdr_plus_bits_s {
-+	u16 len_itu_t_t35_country_code;
-+	u16 len_itu_t_t35_terminal_provider_code;
-+	u16 len_itu_t_t35_terminal_provider_oriented_code;
-+	u16 len_application_identifier;
-+	u16 len_application_version;
-+	/*num_windows max is 3*/
-+	u16 len_num_windows;
-+	/*windows xy*/
-+	u16 len_window_upper_left_corner_x;
-+	u16 len_window_upper_left_corner_y;
-+	u16 len_window_lower_right_corner_x;
-+	u16 len_window_lower_right_corner_y;
-+	u16 len_center_of_ellipse_x;
-+	u16 len_center_of_ellipse_y;
-+	u16 len_rotation_angle;
-+	u16 len_semimajor_axis_internal_ellipse;
-+	u16 len_semimajor_axis_external_ellipse;
-+	u16 len_semiminor_axis_external_ellipse;
-+	u16 len_overlap_process_option;
-+	/*target luminance*/
-+	u16 len_tgt_sys_disp_max_lumi;
-+	u16 len_tgt_sys_disp_act_pk_lumi_flag;
-+	u16 len_num_rows_tgt_sys_disp_act_pk_lumi;
-+	u16 len_num_cols_tgt_sys_disp_act_pk_lumi;
-+	u16 len_tgt_sys_disp_act_pk_lumi;
-+
-+	/*num_windows max is 3, e.g maxscl[num_windows][i];*/
-+	u16 len_maxscl;
-+	u16 len_average_maxrgb;
-+	u16 len_num_distribution_maxrgb_percentiles;
-+	u16 len_distribution_maxrgb_percentages;
-+	u16 len_distribution_maxrgb_percentiles;
-+	u16 len_fraction_bright_pixels;
-+
-+	u16 len_mast_disp_act_pk_lumi_flag;
-+	u16 len_num_rows_mast_disp_act_pk_lumi;
-+	u16 len_num_cols_mast_disp_act_pk_lumi;
-+	u16 len_mast_disp_act_pk_lumi;
-+	/*num_windows max is 3, e.g knee_point_x[num_windows]*/
-+	u16 len_tone_mapping_flag;
-+	u16 len_knee_point_x;
-+	u16 len_knee_point_y;
-+	u16 len_num_bezier_curve_anchors;
-+	u16 len_bezier_curve_anchors;
-+	u16 len_color_saturation_mapping_flag;
-+	u16 len_color_saturation_weight;
-+};
-+
-+static struct hdr_plus_bits_s sei_md_bits = {
-+	.len_itu_t_t35_country_code = 8,
-+	.len_itu_t_t35_terminal_provider_code = 16,
-+	.len_itu_t_t35_terminal_provider_oriented_code = 16,
-+	.len_application_identifier = 8,
-+	.len_application_version = 8,
-+	.len_num_windows = 2,
-+	.len_window_upper_left_corner_x = 16,
-+	.len_window_upper_left_corner_y = 16,
-+	.len_window_lower_right_corner_x = 16,
-+	.len_window_lower_right_corner_y = 16,
-+	.len_center_of_ellipse_x = 16,
-+	.len_center_of_ellipse_y = 16,
-+	.len_rotation_angle = 8,
-+	.len_semimajor_axis_internal_ellipse = 16,
-+	.len_semimajor_axis_external_ellipse = 16,
-+	.len_semiminor_axis_external_ellipse = 16,
-+	.len_overlap_process_option = 1,
-+	.len_tgt_sys_disp_max_lumi = 27,
-+	.len_tgt_sys_disp_act_pk_lumi_flag = 1,
-+	.len_num_rows_tgt_sys_disp_act_pk_lumi = 5,
-+	.len_num_cols_tgt_sys_disp_act_pk_lumi = 5,
-+	.len_tgt_sys_disp_act_pk_lumi = 4,
-+	.len_maxscl = 17,
-+	.len_average_maxrgb = 17,
-+	.len_num_distribution_maxrgb_percentiles = 4,
-+	.len_distribution_maxrgb_percentages = 7,
-+	.len_distribution_maxrgb_percentiles = 17,
-+	.len_fraction_bright_pixels = 10,
-+	.len_mast_disp_act_pk_lumi_flag = 1,
-+	.len_num_rows_mast_disp_act_pk_lumi = 5,
-+	.len_num_cols_mast_disp_act_pk_lumi = 5,
-+	.len_mast_disp_act_pk_lumi = 4,
-+	.len_tone_mapping_flag = 1,
-+	.len_knee_point_x = 12,
-+	.len_knee_point_y = 12,
-+	.len_num_bezier_curve_anchors = 4,
-+	.len_bezier_curve_anchors = 10,
-+	.len_color_saturation_mapping_flag = 1,
-+	.len_color_saturation_weight = 6
-+};
-+
-+static unsigned long last_osd_ioctl_time;
-+static unsigned int osd_L5_timeout_ms = 3000;
 +
 +/* ---- HDR10+ -> DV generation, ported from the reference ---- */
 +
@@ -1848,6 +1882,8 @@ index 0000000000..ffff0fff0ff0
 +		if (!generate_DV_from_hdr10p || !hdr10p_sei)
 +			return;
 +		dv_injection_log(1, "dv injection: building DV metadata from HDR10+\n");
++		memcpy(dv_inj_hdr10p_dm, dv_inj_hdr10p_template,
++		       sizeof(dv_inj_hdr10p_dm));
 +		form_dv_sei_payload_from_hdr10plus(hdr10p_sei, payload_len,
 +						   dv_inj_hdr10p_dm,
 +						   vf->prop.master_display_colour.luminance[0],
@@ -1864,8 +1900,10 @@ index 0000000000..ffff0fff0ff0
 +
 +	/* Level 5 (active area) and Level 1 (luminance) are adjusted per frame,
 +	 * exactly like the reference implementation does before packing. */
-+	modify_L5_data(vf, (u8 *)payload);
-+	auto_set_L1((u8 *)payload);
++	if (L5_adjust_mode >= 0)
++		modify_L5_data(vf, (u8 *)payload);
++	if (L1_adjust)
++		auto_set_L1((u8 *)payload);
 +
 +	slot = &dv_inj_pool[vf->index & (DV_INJ_POOL_SIZE - 1)];
 +	mutex_lock(&dv_injection_lock);
@@ -1905,6 +1943,18 @@ index 0000000000..ffff0fff0ff0
 +	return force_block_other_vsif_for_DV ||
 +	       (auto_block_other_vsif_for_DV && dv_metadata);
 +}
++
++
++/*
++ * Author semantics: after a GUI/OSD ioctl the active-area handling stays off
++ * for osd_L5_timeout_ms so menu drawing is not mistaken for a new composition.
++ * N1's fbdev ioctl (osd_fb.c) calls this.
++ */
++void dv_injection_note_osd_activity(void)
++{
++	WRITE_ONCE(last_osd_ioctl_time, jiffies);
++}
++EXPORT_SYMBOL(dv_injection_note_osd_activity);
 +
 +bool dv_injection_block_hdr10(void)
 +{
@@ -2050,10 +2100,10 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  EXPORT_SYMBOL(update_vframe_src_fmt);
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..bbbb0bbb0bb0
+index 0000000000..2222222222
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,25 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -2073,6 +2123,7 @@ index 0000000000..bbbb0bbb0bb0
 +void dv_injection_process_frame(struct vframe_s *vf);
 +bool dv_injection_render_frame(struct vframe_s *vf);
 +bool dv_injection_block_hdr10(void);
++void dv_injection_note_osd_activity(void);
 +
 +/* hand over the raw DM metadata bytes (user space / Kodi) */
 +int dv_injection_set_metadata(const u8 *data, u32 size);
