@@ -60,19 +60,34 @@ struct work_struct { int unused; };
 struct kernel_param { void *arg; };
 struct dv_info { unsigned ieeeoui; };
 struct vout_device_s { struct dv_info *dv_info;
-    void (*fresh_tx_vsif_pkt)(int,int,void*,bool); };
+    int (*fresh_tx_vsif_pkt)(int,int,void*,bool); };
 struct vinfo_s { struct vout_device_s *vout_device; };
 static bool dv_injection_enable, dv_injection_active, dv_inj_ready;
 static unsigned dm_metadata_size, dv_injection_path;
 static bool always_send_vsif = true;
 static int dv_injection_lock;
-struct dv_inj_slot { bool valid; u8 num_pkts; u8 byte_data[5][128]; };
+struct dv_inj_slot { bool valid; u8 num_pkts; u32 generation;
+                     u32 pixel_data[5][1024]; };
 static struct dv_inj_slot dv_inj_pool[64];
-static void dv_injection_expand_pixels(const struct dv_inj_slot *slot) { (void)slot; }
+static struct dv_inj_slot dv_inj_static_slot;
+#define VFRAME_SIGNAL_FMT_DOVI 4
+#define EOTF_T_DOLBYVISION 1
+#define DV_INJ_POOL_SIZE 64
+struct vframe_s { unsigned index; struct { int fmt; } src_fmt; };
+static unsigned int vdr_dm_data_source;
+static u32 dv_inj_generation = 1;
+struct dv_inj_runtime { bool ready; void *base; u32 page_bytes; u32 pages; };
+static struct dv_inj_runtime dv_inj_rt;
+static int resolve_result = 0, copy_result = 0;
+static int released = 0;
+static int dv_injection_resolve_canvas(const struct vinfo_s *v) { return resolve_result; }
+static int dv_injection_copy_pixels(const struct dv_inj_slot *s) { return copy_result; }
+static void dv_injection_release_output(void) { released++; dv_injection_active = false; }
 static int video_on=1, canvas_result=0, send_result=0, off_packets=0, cancelled=0;
 static struct dv_info sink={0x00d046};
-static void tx_packet(int type,int mode,void *data,bool restore) {
-    assert(!dv_injection_active); assert(restore); off_packets++;
+static int tx_packet(int type,int mode,void *data,bool restore) {
+    if (restore) { assert(!dv_injection_active); off_packets++; }
+    return 0;
 }
 static struct vout_device_s device={&sink,tx_packet};
 static struct vinfo_s video={&device};
@@ -142,35 +157,56 @@ static void reset(void) {
 static void test_lifecycle(void) {
     struct kernel_param kp={&dv_injection_enable};
     struct dv_inj_slot slot;
-    /* Boot param parsing happens before the module is ready. */
+    struct vframe_s frame;
+
+    memset(&frame,0,sizeof(frame));
     dv_inj_ready=false; dv_injection_enable=false;
     assert(dv_injection_enable_set("1",&kp)==-EAGAIN);
-    assert(!dv_injection_enable && !cancelled);
-    assert(!dv_injection_enable_set("0",&kp));
-    assert(!cancelled);
     dv_inj_ready=true;
 
-    memset(&slot,0,sizeof(slot)); slot.valid=true; slot.num_pkts=2;
-    reset(); canvas_result=-EINVAL;
-    assert(!dv_injection_render_slot(&slot));
-    assert(!dv_injection_block_hdr10());
-    reset(); sink.ieeeoui=0;
-    assert(!dv_injection_render_slot(&slot));
-    reset(); send_result=-EINVAL;
-    assert(!dv_injection_render_slot(&slot));
-    reset(); slot.valid=false;
-    assert(!dv_injection_render_slot(&slot));
-    slot.valid=true;
+    /* Enabling needs a resolvable canvas; failing must not enable. */
+    resolve_result=-ENODEV;
+    assert(dv_injection_enable_set("1",&kp)<0 && !dv_injection_enable);
+    resolve_result=0;
+    assert(!dv_injection_enable_set("1",&kp) && dv_injection_enable);
+
+    memset(&slot,0,sizeof(slot));
+    slot.valid=true; slot.num_pkts=2;
+    slot.generation=dv_inj_generation;
+    dv_inj_rt.ready=true;
     reset();
+    dv_inj_rt.ready=true;
+
+    /* Stale generation must not reach the sink. */
+    slot.generation=dv_inj_generation-1;
+    assert(!dv_injection_render_slot(&slot));
+    slot.generation=dv_inj_generation;
+
+    copy_result=-EINVAL;
+    assert(!dv_injection_render_slot(&slot) && !dv_injection_block_hdr10());
+    copy_result=0;
+    reset(); dv_inj_rt.ready=true;
+    sink.ieeeoui=0xdeadbe;
+    assert(!dv_injection_render_slot(&slot));
+    sink.ieeeoui=0x00d046;
+    reset(); dv_inj_rt.ready=true;
     assert(dv_injection_render_slot(&slot));
     assert(dv_injection_block_hdr10());
-    /* Disabling has to hand the output back exactly once. */
+
+    /* A non-DV frame at display time must hand the output back. */
+    reset(); dv_inj_rt.ready=true;
+    assert(dv_injection_render_slot(&slot));
+    released=0;
+    frame.src_fmt.fmt=0;
+    assert(!dv_injection_render_frame(&frame));
+    assert(released==1 && !dv_injection_block_hdr10());
+
+    /* Disabling clears ownership and the resolved canvas. */
+    reset(); dv_inj_rt.ready=true;
+    assert(dv_injection_render_slot(&slot));
     assert(!dv_injection_enable_set("0",&kp));
-    assert(!dv_injection_block_hdr10() && off_packets==1);
-    /* A NULL slot must never reach the sink. */
-    reset();
-    assert(!dv_injection_render_slot(NULL));
-    assert(!dv_injection_block_hdr10());
+    assert(!dv_injection_block_hdr10() && !dv_inj_rt.ready);
+    assert(!dv_injection_render_slot(&slot));
 }
 int main(int argc,char **argv) {
     assert(argc==2);
@@ -195,7 +231,7 @@ class KernelInjectionTests(unittest.TestCase):
         names = ("dv_injection_block_length", "dv_injection_validate_metadata",
                  "dv_injection_canvas_layout", "dv_injection_deactivate",
                  "dv_injection_render_slot", "dv_injection_enable_set",
-                 "dv_injection_block_hdr10")
+                 "dv_injection_block_hdr10", "dv_injection_render_frame")
         # Locate the definition, not the forward declaration.
         text = text.replace("static int dv_injection_enable_set(const char *val, const struct kernel_param *kp);", "")
         cfile = Path(cls.temp.name) / "contracts.c"

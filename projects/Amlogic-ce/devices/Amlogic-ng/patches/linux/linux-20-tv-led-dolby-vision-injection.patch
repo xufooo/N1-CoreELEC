@@ -53,11 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..4444444444
+index 0000000000..5555555555
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,812 @@
-+++ b/drivers/amlogic/media/video_sink/dv_injection.c
+@@ -0,0 +1,903 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -149,11 +148,27 @@ index 0000000000..4444444444
 +struct dv_inj_slot {
 +	bool valid;
 +	u8 num_pkts;
-+	u8 byte_data[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_NUM_BYTES_PER_PACKET];
++	u32 generation;
++	u32 pixel_data[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_PIXELS_PER_PKT];
 +};
 +
 +static struct dv_inj_slot dv_inj_pool[DV_INJ_POOL_SIZE];
 +static struct dv_inj_slot dv_inj_static_slot;
++static u32 dv_inj_generation;
++
++/*
++ * Resolved OSD canvas, computed in process context when injection is
++ * enabled.  The display path runs inside the vsync interrupt, so it must
++ * not call canvas_read(), take a mutex or allocate: it only copies the
++ * already prepared pixels to this address.
++ */
++struct dv_inj_runtime {
++	bool ready;
++	u8 __iomem *base;
++	u32 page_bytes;
++	u32 pages;
++};
++static struct dv_inj_runtime dv_inj_rt;
 +
 +/* 0: per-frame metadata from the decoder (playback), 1: static buffer (debug) */
 +static unsigned int vdr_dm_data_source;
@@ -452,21 +467,20 @@ index 0000000000..4444444444
 +	return 0;
 +}
 +
-+/* bit -> pixel, into the scratch buffer used by the canvas writer */
-+static void dv_injection_expand_pixels(const struct dv_inj_slot *slot)
++/* bit -> pixel, into the slot's prepared pixel buffer */
++static void dv_injection_expand_pixels(const u8 byte_data[][DV_INJ_NUM_BYTES_PER_PACKET],
++				       u8 num_pkts,
++				       u32 pixel_data[][DV_INJ_PIXELS_PER_PKT])
 +{
 +	u8 pkt_num, byte_num, bit_num, injected_byte;
 +
-+	dm_packet.num_pkts = slot->num_pkts;
-+	for (pkt_num = 0; pkt_num < slot->num_pkts; pkt_num++) {
-+		memcpy(dm_packet.byte_data[pkt_num], slot->byte_data[pkt_num],
-+		       DV_INJ_NUM_BYTES_PER_PACKET);
++	for (pkt_num = 0; pkt_num < num_pkts; pkt_num++) {
 +		for (byte_num = 0; byte_num < DV_INJ_NUM_BYTES_PER_PACKET;
 +		     byte_num++) {
-+			injected_byte = slot->byte_data[pkt_num][byte_num];
++			injected_byte = byte_data[pkt_num][byte_num];
 +			for (bit_num = 0; bit_num < DV_INJ_BITS_PER_BYTE;
 +			     bit_num++) {
-+				dm_packet.pixel_data[pkt_num]
++				pixel_data[pkt_num]
 +					[byte_num * DV_INJ_BITS_PER_BYTE +
 +					 bit_num] =
 +					((injected_byte >> (7 - bit_num)) & 1) ?
@@ -549,22 +563,21 @@ index 0000000000..4444444444
 +	return 0;
 +}
 +
-+static int dv_injection_write_canvas(const struct vinfo_s *vinfo)
++/* Process context: resolve and validate the OSD canvas once.  The display
++ * path runs in the vsync interrupt and must not take console_lock/fb locks.
++ */
++static int dv_injection_resolve_canvas(const struct vinfo_s *vinfo)
 +{
 +	struct canvas_s cs;
 +	struct fb_info *info;
 +	u64 page_bytes;
-+	u32 pages, page, pkt, repeat;
++	u32 pages;
 +	u32 canvas_index = READ_ONCE(osd_canvas);
-+	u32 repeats = READ_ONCE(packet_repeat);
 +	int ret = -EINVAL;
 +
 +	if (READ_ONCE(bytes_per_pixel) != 4 || canvas_index > 255)
 +		return -EINVAL;
-+	/* console_lock protects registration/mode changes, fb_info.lock the
-+	 * driver's buffer geometry. Never derive a pointer from an arbitrary
-+	 * canvas physical address; use fb0's existing mapped screen_base.
-+	 */
++
 +	console_lock();
 +	info = registered_fb[0];
 +	if (!info || !lock_fb_info(info))
@@ -580,34 +593,54 @@ index 0000000000..4444444444
 +		goto out_fb;
 +	ret = dv_injection_canvas_layout(info->fix.line_length,
 +		info->var.xres, info->var.yres, info->var.yres_virtual,
-+		info->fix.smem_len, dm_packet.num_pkts, repeats,
-+		&page_bytes, &pages);
++		info->fix.smem_len, DV_INJ_MAX_NUM_HDR_DM_PACKETS,
++		READ_ONCE(packet_repeat), &page_bytes, &pages);
 +	if (ret)
 +		goto out_fb;
-+	osd_pixel_offset = page_bytes / 4;
-+	for (page = 0; page < pages; page++) {
-+		for (pkt = 0; pkt < dm_packet.num_pkts; pkt++) {
-+			for (repeat = 0; repeat < repeats; repeat++) {
-+				u64 offset = page * page_bytes +
-+					(pkt * DV_INJ_NUM_HDR_DM_PACKET_REPEATS +
-+					 repeat) * DV_INJ_PIXELS_PER_PKT * 4;
-+
-+				memcpy_toio((u8 __iomem *)info->screen_base + offset,
-+					dm_packet.pixel_data[pkt], DV_INJ_PIXELS_PER_PKT * 4);
-+			}
-+		}
-+	}
-+	/* Order mapped buffer writes before announcing the DV signal. */
-+	wmb();
++	WRITE_ONCE(osd_pixel_offset, (unsigned int)(page_bytes / 4));
++	WRITE_ONCE(dv_inj_rt.base, (u8 __iomem *)info->screen_base);
++	WRITE_ONCE(dv_inj_rt.page_bytes, (u32)page_bytes);
++	WRITE_ONCE(dv_inj_rt.pages, pages);
++	WRITE_ONCE(dv_inj_rt.ready, true);
 +	ret = 0;
 +out_fb:
 +	unlock_fb_info(info);
 +out_console:
 +	console_unlock();
-+	if (!ret)
-+		dv_injection_log(2, "dv injection: metadata written to canvas %u\n", osd_canvas);
 +	return ret;
 +}
++
++/* Interrupt context: copy the prepared pixels of one slot, nothing else. */
++static int dv_injection_copy_pixels(const struct dv_inj_slot *slot)
++{
++	u8 __iomem *base = READ_ONCE(dv_inj_rt.base);
++	u32 page_bytes = READ_ONCE(dv_inj_rt.page_bytes);
++	u32 pages = READ_ONCE(dv_inj_rt.pages);
++	u32 repeats = READ_ONCE(packet_repeat);
++	u32 page, pkt, repeat;
++
++	if (!READ_ONCE(dv_inj_rt.ready) || !base || !slot->num_pkts ||
++	    repeats < 1 || repeats > DV_INJ_NUM_HDR_DM_PACKET_REPEATS)
++		return -EINVAL;
++
++	for (page = 0; page < pages; page++) {
++		for (pkt = 0; pkt < slot->num_pkts; pkt++) {
++			for (repeat = 0; repeat < repeats; repeat++) {
++				u64 offset = page * page_bytes +
++					(pkt * DV_INJ_NUM_HDR_DM_PACKET_REPEATS +
++					 repeat) * DV_INJ_PIXELS_PER_PKT * 4;
++
++				memcpy_toio(base + offset,
++					    slot->pixel_data[pkt],
++					    DV_INJ_PIXELS_PER_PKT * 4);
++			}
++		}
++	}
++	/* Order mapped buffer writes before announcing the DV signal. */
++	wmb();
++	return 0;
++}
++
 +
 +static int dv_injection_send_vsif(const struct vinfo_s *vinfo)
 +{
@@ -665,6 +698,7 @@ index 0000000000..4444444444
 +	if (!dv_injection_active)
 +		return;
 +	WRITE_ONCE(dv_injection_active, false);
++	WRITE_ONCE(dv_inj_rt.ready, false);
 +	vinfo = get_current_vinfo();
 +	if (vinfo && vinfo->vout_device &&
 +	    vinfo->vout_device->fresh_tx_vsif_pkt)
@@ -675,12 +709,29 @@ index 0000000000..4444444444
 +/* Already supplied by the amvideo object containing this implementation. */
 +extern u32 get_video_enabled(void);
 +
++static void dv_injection_release_output(void)
++{
++	const struct vinfo_s *vinfo = get_current_vinfo();
++
++	if (!READ_ONCE(dv_injection_active))
++		return;
++	WRITE_ONCE(dv_injection_active, false);
++	if (vinfo && vinfo->vout_device && vinfo->vout_device->fresh_tx_vsif_pkt)
++		vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_NULL, RGB_8BIT,
++						      NULL, true);
++}
++
++/*
++ * Interrupt context (vsync).  No mutex, no console_lock, no allocation:
++ * only the prepared pixels and the resolved canvas are touched.
++ */
 +static bool dv_injection_render_slot(struct dv_inj_slot *slot)
 +{
 +	const struct vinfo_s *vinfo;
-+	int ret = 0;
 +
-+	if (!slot || !slot->valid)
++	if (!slot || !READ_ONCE(slot->valid) || !READ_ONCE(dv_inj_rt.ready))
++		return false;
++	if (slot->generation != READ_ONCE(dv_inj_generation))
 +		return false;
 +	vinfo = get_current_vinfo();
 +	if (!vinfo || !vinfo->vout_device ||
@@ -689,17 +740,20 @@ index 0000000000..4444444444
 +	    vinfo->vout_device->dv_info->ieeeoui != 0x00d046)
 +		return false;
 +
-+	mutex_lock(&dv_injection_lock);
-+	dv_injection_expand_pixels(slot);
-+	if (dv_injection_write_canvas(vinfo))
-+		ret = -EIO;
-+	else if (always_send_vsif)
-+		ret = dv_injection_send_vsif(vinfo);
-+	if (!ret)
-+		WRITE_ONCE(dv_injection_active, true);
-+	mutex_unlock(&dv_injection_lock);
-+	return ret == 0;
++	if (dv_injection_copy_pixels(slot)) {
++		dv_injection_release_output();
++		return false;
++	}
++	if (always_send_vsif &&
++	    vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_DOLBYVISION,
++						  RGB_8BIT, NULL, false)) {
++		dv_injection_release_output();
++		return false;
++	}
++	WRITE_ONCE(dv_injection_active, true);
++	return true;
 +}
++
 +
 +/*
 + * Called at display time (primary_render_frame): pick the metadata that
@@ -717,9 +771,16 @@ index 0000000000..4444444444
 +	} else if (vf->src_fmt.fmt == VFRAME_SIGNAL_FMT_DOVI) {
 +		slot = &dv_inj_pool[vf->index & (DV_INJ_POOL_SIZE - 1)];
 +	} else {
++		/* SDR/HDR content or a stopped stream: hand the output back
++		 * instead of leaving the sink latched in Dolby Vision. */
++		dv_injection_release_output();
 +		return false;
 +	}
-+	return dv_injection_render_slot(slot);
++	if (!dv_injection_render_slot(slot)) {
++		dv_injection_release_output();
++		return false;
++	}
++	return true;
 +}
 +EXPORT_SYMBOL(dv_injection_render_frame);
 +
@@ -733,13 +794,30 @@ index 0000000000..4444444444
 +	ret = param_set_bool(val, &temporary);
 +	if (ret || (enabled && !dv_inj_ready))
 +		return ret ? ret : -EAGAIN;
-+	mutex_lock(&dv_injection_lock);
-+	*(bool *)kp->arg = enabled;
-+	if (!enabled)
-+		dv_injection_deactivate();
-+	mutex_unlock(&dv_injection_lock);
-+	if (!enabled)
++	if (enabled) {
++		/* Process context: resolve the canvas once, then start a new
++		 * generation so stale slots from a previous clip cannot be
++		 * reused by the display path. */
++		const struct vinfo_s *vinfo = get_current_vinfo();
++
++		mutex_lock(&dv_injection_lock);
 +		memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++		WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
++		if (!vinfo || dv_injection_resolve_canvas(vinfo)) {
++			mutex_unlock(&dv_injection_lock);
++			return -ENODEV;
++		}
++		*(bool *)kp->arg = true;
++		mutex_unlock(&dv_injection_lock);
++		return 0;
++	}
++
++	mutex_lock(&dv_injection_lock);
++	*(bool *)kp->arg = false;
++	dv_injection_deactivate();
++	WRITE_ONCE(dv_inj_rt.ready, false);
++	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++	mutex_unlock(&dv_injection_lock);
 +	return 0;
 +}
 +
@@ -765,9 +843,16 @@ index 0000000000..4444444444
 +
 +	slot = &dv_inj_pool[vf->index & (DV_INJ_POOL_SIZE - 1)];
 +	mutex_lock(&dv_injection_lock);
-+	if (!dv_injection_pack_bytes(slot->byte_data, &slot->num_pkts,
-+				     payload, payload_len))
-+		slot->valid = true;
++	dm_packet.num_pkts = 0;
++	if (!dv_injection_pack_bytes(dm_packet.byte_data,
++				     &dm_packet.num_pkts, payload, payload_len)) {
++		dv_injection_expand_pixels(dm_packet.byte_data,
++					   dm_packet.num_pkts,
++					   slot->pixel_data);
++		slot->num_pkts = dm_packet.num_pkts;
++		slot->generation = READ_ONCE(dv_inj_generation);
++		WRITE_ONCE(slot->valid, true);
++	}
 +	mutex_unlock(&dv_injection_lock);
 +}
 +
@@ -817,9 +902,14 @@ index 0000000000..4444444444
 +		mutex_unlock(&dv_injection_lock);
 +		return size;
 +	}
-+	ret = dv_injection_pack_bytes(dv_inj_static_slot.byte_data,
-+				      &dv_inj_static_slot.num_pkts, parsed, size);
++	ret = dv_injection_pack_bytes(dm_packet.byte_data,
++				      &dm_packet.num_pkts, parsed, size);
 +	if (!ret) {
++		dv_injection_expand_pixels(dm_packet.byte_data,
++					   dm_packet.num_pkts,
++					   dv_inj_static_slot.pixel_data);
++		dv_inj_static_slot.num_pkts = dm_packet.num_pkts;
++		dv_inj_static_slot.generation = READ_ONCE(dv_inj_generation);
 +		dv_inj_static_slot.valid = true;
 +		strcpy(dv_metadata, val);
 +		memcpy(dm_metadata, parsed, size);
@@ -850,6 +940,7 @@ index 0000000000..4444444444
 +
 +static int __init dv_injection_init(void)
 +{
++	dv_inj_generation = 1;
 +	dv_inj_ready = true;
 +	dv_injection_log(1, "dv injection: module loaded\n");
 +	return 0;
@@ -870,7 +961,6 @@ index 0000000000..4444444444
 +MODULE_AUTHOR("N1-CoreELEC project");
 +MODULE_LICENSE("GPL");
 diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/video_sink/video.c
-index a93fd94..e0e90c6 100644
 --- a/drivers/amlogic/media/video_sink/video.c
 +++ b/drivers/amlogic/media/video_sink/video.c
 @@ -44,6 +44,9 @@
@@ -883,14 +973,14 @@ index a93fd94..e0e90c6 100644
  #include <linux/amlogic/media/canvas/canvas_mgr.h>
  #include <linux/dma-mapping.h>
  #include <linux/dma-contiguous.h>
-@@ -3902,6 +3902,15 @@
+@@ -4194,6 +4197,15 @@
  	else
  		dispbuf = layer->dispbuf;
  
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+	/* TV-led Dolby Vision: emit the metadata belonging to this very frame,
-+	 * paired by decoder frame index.  Doing it here keeps the write on the
-+	 * display side instead of a free running timer.
++	/* TV-led Dolby Vision: hand the metadata of this very frame to the
++	 * sink.  This runs in the vsync interrupt, so the callee must stay
++	 * IRQ-safe and may not sleep.
 +	 */
 +	if (dispbuf)
 +		dv_injection_render_frame(dispbuf);
@@ -899,7 +989,7 @@ index a93fd94..e0e90c6 100644
  	/* process cur frame for each vsync */
  	if (dispbuf) {
  		int need_afbc =
-@@ -7787,6 +7790,13 @@ s32 update_vframe_src_fmt(
+@@ -7787,6 +7799,13 @@
  	if (vf->src_fmt.fmt != VFRAME_SIGNAL_FMT_DOVI)
  		clear_vframe_dovi_md_info(vf);
  
