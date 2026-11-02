@@ -41,6 +41,58 @@ diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_
  	struct osd_fb_dev_s *fbdev = (struct osd_fb_dev_s *)info->par;
  	void __user *argp = (void __user *)arg;
  	u32 src_colorkey;/* 16 bit or 24 bit */
+@@ -1509,6 +1518,12 @@
+ 		fbdev->fb_len = 0;
+ 		fbdev->fb_mem_paddr = 0;
+ 		fbdev->fb_mem_vaddr = NULL;
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++		/* F3: the mapping is about to disappear; stop the injection
++		 * writer before it becomes a stale pointer.
++		 */
++		dv_injection_note_canvas_change();
++#endif
+ 		info->screen_base = NULL;
+ 	}
+ }
+diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_hw.c
+--- a/drivers/amlogic/media/osd/osd_hw.c
++++ b/drivers/amlogic/media/osd/osd_hw.c
+@@ -34,6 +34,9 @@
+ #include <linux/sysfs.h>
+ #include <linux/uaccess.h>
+ #include <asm/div64.h>
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++#include <linux/amlogic/media/video_sink/dv_injection.h>
++#endif
+ #include <linux/amlogic/cpu_version.h>
+ #include <linux/cpumask.h>
+ #include <linux/cpu.h>
+@@ -4625,6 +4628,12 @@
+ 
+ static bool osd_ge2d_compose_pan_display(struct osd_fence_map_s *fence_map)
+ {
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* F3: the compose path re-points the canvas at an external buffer, so
++	 * any cached injection target must be re-validated first.
++	 */
++	dv_injection_note_canvas_change();
++#endif
+ 	u32 index = fence_map->fb_index;
+ 	bool free_scale_set = false;
+ 
+@@ -4696,6 +4705,12 @@
+ 
+ static bool osd_direct_compose_pan_display(struct osd_fence_map_s *fence_map)
+ {
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* F3: the compose path re-points the canvas at an external buffer, so
++	 * any cached injection target must be re-validated first.
++	 */
++	dv_injection_note_canvas_change();
++#endif
+ 	u32 index = fence_map->fb_index;
+ 	u32 ext_addr = fence_map->ext_addr;
+ 	u32 width_src = 0, width_dst = 0, height_src = 0, height_dst = 0;
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
 index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
@@ -79,10 +131,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..bbbb2222bbbb
+index 0000000000..dddd4444dddd
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2115 @@
+@@ -0,0 +1,2142 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -878,10 +930,18 @@ index 0000000000..bbbb2222bbbb
 +}
 +
 +
++extern bool hdmitx_vsif_tx_ready(void);
++
 +static int dv_injection_send_vsif(const struct vinfo_s *vinfo)
 +{
 +	struct dv_vsif_para vsif;
 +
++	/* F7: hdmitx_set_vsif_pkt() silently drops the packet when the
++	 * synthesizer is not ready or a BIST pattern owns the output, so check
++	 * before claiming the output was taken over.
++	 */
++	if (!hdmitx_vsif_tx_ready())
++		return -EAGAIN;
 +	if (!vinfo || !vinfo->vout_device ||
 +	    !vinfo->vout_device->fresh_tx_vsif_pkt ||
 +	    !vinfo->vout_device->dv_info ||
@@ -968,6 +1028,25 @@ index 0000000000..bbbb2222bbbb
 + * generation and hand the output back instead of letting a leftover frame
 + * keep the DV signal asserted.
 + */
++
++/*
++ * F3: the OSD can point the canvas at an external buffer or drop the fb
++ * mapping entirely.  Called from those paths to stop the interrupt writer
++ * before the target can change or disappear; the watchdog re-resolves after.
++ */
++void dv_injection_note_canvas_change(void)
++{
++	unsigned long flags;
++
++	if (!READ_ONCE(dv_injection_enable))
++		return;
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	WRITE_ONCE(dv_inj_rt.ready, false);
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	WRITE_ONCE(dv_inj_canvas_dirty, true);
++}
++EXPORT_SYMBOL(dv_injection_note_canvas_change);
++
 +void dv_injection_new_stream(void)
 +{
 +	unsigned long flags;
@@ -2283,7 +2362,34 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  #include <linux/amlogic/media/vout/vout_notify.h>
  #ifdef CONFIG_AMLOGIC_SND_SOC
  #include <linux/amlogic/media/sound/aout_notify.h>
-@@ -686,7 +689,15 @@
+@@ -77,6 +80,26 @@
+ static int set_disp_mode_auto(void);
+ static void hdmitx_get_edid(struct hdmitx_dev *hdev);
+ static void hdmitx_set_drm_pkt(struct master_display_info_s *data);
++
++/*
++ * F7: hdmitx_set_vsif_pkt() returns void and bails out silently while the
++ * synthesizer is not ready or while a BIST pattern owns the output.  The
++ * injection module needs to know whether a VSIF was actually handed over, so
++ * expose the same two conditions it checks under edid_spinlock.
++ */
++bool hdmitx_vsif_tx_ready(void)
++{
++	struct hdmitx_dev *hdev = &hdmitx_device;
++	unsigned long flags;
++	bool ok;
++
++	spin_lock_irqsave(&hdev->edid_spinlock, flags);
++	ok = !hdev->bist_lock && hdev->ready != 0;
++	spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
++	return ok;
++}
++EXPORT_SYMBOL(hdmitx_vsif_tx_ready);
++
+ void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type
+ 	tunnel_mode, struct dv_vsif_para *data, bool switch_to_sdr);
+ static void hdmitx_set_hdr10plus_pkt(unsigned int flag,
+@@ -686,7 +709,15 @@
  				int cs = para->cs;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
@@ -2300,7 +2406,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  						para->cs = COLORSPACE_YUV444;
  						break;
  					case RGB_10_12BIT:
-@@ -721,6 +732,13 @@
+@@ -721,6 +752,13 @@
  				int cd = para->cd;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
@@ -2316,10 +2422,10 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  					case RGB_10_12BIT:
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..cccc3333cccc
+index 0000000000..eeee5555eeee
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,28 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -2341,6 +2447,7 @@ index 0000000000..cccc3333cccc
 +bool dv_injection_block_hdr10(void);
 +bool dv_injection_force_422_12(void);
 +void dv_injection_new_stream(void);
++void dv_injection_note_canvas_change(void);
 +void dv_injection_note_osd_activity(void);
 +
 +/* hand over the raw DM metadata bytes (user space / Kodi) */
