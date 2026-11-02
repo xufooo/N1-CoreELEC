@@ -79,10 +79,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..6666666666
+index 0000000000..7777777777
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2048 @@
+@@ -0,0 +1,2064 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -383,6 +383,12 @@ index 0000000000..6666666666
 +	u32 pages;
 +};
 +static struct dv_inj_runtime dv_inj_rt;
++/* F3: the OSD may switch to an external buffer (osd_hw compose) or re-map its
++ * framebuffer at any time, so a single resolved address is not authoritative
++ * for the whole session.  OSD ioctls mark this dirty and the watchdog
++ * re-resolves in process context; the interrupt never does.
++ */
++static bool dv_inj_canvas_dirty;
 +
 +/* 0: per-frame metadata from the decoder (playback), 1: static buffer (debug) */
 +static unsigned int vdr_dm_data_source;
@@ -1053,6 +1059,15 @@ index 0000000000..6666666666
 +		mutex_lock(&dv_injection_lock);
 +		dv_injection_release_output();
 +		mutex_unlock(&dv_injection_lock);
++	}
++	/* Re-resolve after OSD activity: the canvas address or the fb mapping may
++	 * have moved.  A failure keeps the previous state and is counted. */
++	if (READ_ONCE(dv_inj_canvas_dirty)) {
++		const struct vinfo_s *vinfo = get_current_vinfo();
++
++		WRITE_ONCE(dv_inj_canvas_dirty, false);
++		if (vinfo && dv_injection_resolve_canvas(vinfo))
++			dv_injection_log(1, "dv injection: canvas re-resolve failed\n");
 +	}
 +	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(1000));
 +}
@@ -2027,6 +2042,7 @@ index 0000000000..6666666666
 +void dv_injection_note_osd_activity(void)
 +{
 +	WRITE_ONCE(last_osd_ioctl_time, jiffies);
++	WRITE_ONCE(dv_inj_canvas_dirty, true);
 +}
 +EXPORT_SYMBOL(dv_injection_note_osd_activity);
 +
