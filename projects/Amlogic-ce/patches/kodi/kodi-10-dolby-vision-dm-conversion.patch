@@ -8,21 +8,20 @@
  #include <math.h>
  
  #include "DVDCodecs/DVDFactoryCodec.h"
-@@ -184,7 +185,13 @@
-         m_bitstream = new CBitstreamConverter;
-         m_bitstream->Open(m_hints.codec, m_hints.extradata.GetData(), m_hints.extradata.GetSize(), true);
-         m_bitstream->ResetStartDecode();
--        // make sure we do not leak the existing m_hints.extradata
-+        /* N1 TV-led injection: the kernel packetizer is fed by us, so the DM
-+       * serialisation must not depend on the Dolby Core capability check
-+       * above (which is false on GXL).  Opt-in through a flag file only. */
+@@ -324,6 +325,13 @@
+           }
+         }
+       }
++
++      /* N1 TV-led injection: the HEVC converter must rewrite the RPU into the
++       * HDMI DM serialisation the kernel packetizer expects.  This is
++       * independent of aml_support_dolby_vision(), which is false on GXL, and
++       * opt-in through a flag file only. */
 +      if (m_bitstream && access("/storage/.config/n1-dv-injection", F_OK) == 0)
 +        m_bitstream->SetConvertDovi(true);
-+
-+      // make sure we do not leak the existing m_hints.extradata
-         m_hints.extradata = {};
-         m_hints.extradata = FFmpegExtraData(m_bitstream->GetExtraSize());
-         memcpy(m_hints.extradata.GetData(), m_bitstream->GetExtraData(), m_hints.extradata.GetSize());
+ 
+       // make sure we do not leak the existing m_hints.extradata
+       m_hints.extradata = {};
 --- a/xbmc/utils/BitstreamConverter.cpp
 +++ b/xbmc/utils/BitstreamConverter.cpp
 @@ -1839,7 +1839,11 @@

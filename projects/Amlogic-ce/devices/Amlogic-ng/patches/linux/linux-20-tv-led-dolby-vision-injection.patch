@@ -53,10 +53,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..eeee0eee0ee0
+index 0000000000..ffff0fff0ff0
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1765 @@
+@@ -0,0 +1,1948 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -109,6 +109,7 @@ index 0000000000..eeee0eee0ee0
 +/* Dolby Vision metadata packet format (as used by the reference
 + * implementation): 128 byte packets, CRC32 in the last 4 bytes.
 + */
++#define HDR10PLUS_DV_PAYLOAD_SIZE 117
 +#define DV_INJ_NUM_BYTES_PER_PACKET	128
 +#define DV_INJ_CRC_OFFSET		124
 +#define DV_INJ_MAX_NUM_HDR_DM_PACKETS	5
@@ -155,7 +156,14 @@ index 0000000000..eeee0eee0ee0
 +static struct dv_inj_slot dv_inj_pool[DV_INJ_POOL_SIZE];
 +static struct dv_inj_slot dv_inj_static_slot;
 +static u32 dv_inj_generation;
-+static u8 dv_inj_hdr10p_dm[HDR10PLUS_DV_PAYLOAD_SIZE];
++/* Fixed 117 byte DM template carrying matrix/signal fields and the
++ * L1/L5/L9/L11/L254 blocks; only the luminance fields are rewritten.
++ * Taken from the reference: an all-zero buffer has no extension block,
++ * and get_L1() would dereference NULL.
++ */
++static u8 dv_inj_hdr10p_dm[HDR10PLUS_DV_PAYLOAD_SIZE] = {
++	0,1,37,102,0,0,53,234,37,102,249,252,235,28,37,102,68,202,0,0,1,0,0,0,8,0,0,0,8,0,0,0,28,54,34,67,1,134,14,70,48,142,5,20,0,0,1,166,62,90,255,255,0,0,0,0,0,0,0,0,12,0,1,1,0,7,12,7,42,42,5,0,0,0,6,1,0,6,12,16,8,111,0,0,0,8,5,0,0,0,0,0,0,0,0,0,0,0,1,9,0,0,0,0,4,11,1,16,0,0,0,0,0,2,254,0,2
++};
 +
 +/*
 + * Resolved OSD canvas, computed in process context when injection is
@@ -1139,6 +1147,174 @@ index 0000000000..eeee0eee0ee0
 +}
 +
 +
++
++/* ---- constants required by the ported HDR10+/L5 code (from the reference) ---- */
++#define DV_SEI 0x01000000
++#define DV_SEI_VDR_HEADER_LENGTH 3
++#define DV_SEI_VDR_HEADER_BYTE_1 0x7C
++#define DV_SEI_VDR_HEADER_BYTE_2 0x01
++#define DV_SEI_VDR_HEADER_BYTE_3 0xFF
++#define DV_SEI_VDR_BODY_MIN_LENGTH 71
++#define SEI_HEADER_SIZE 8
++#define DV_SEI_VDR_MIN_LENGTH (DV_SEI_VDR_HEADER_LENGTH + DV_SEI_VDR_BODY_MIN_LENGTH + SEI_HEADER_SIZE)
++
++#define MAX_METADATA_ROWS_4K 4
++#define MAX_DM_METADATA_SIZE 594
++#define POOL_SIZE 64
++
++#define SOURCE_MIN_PQ_OFFSET 64
++#define SOURCE_MAX_PQ_OFFSET 66
++
++#define L1_MAX_PQ_MAX_VALUE 4095
++#define L1_MIN_PQ_MAX_VALUE 12
++#define L1_MAX_PQ_MIN_VALUE 2081
++#define L1_AVG_PQ_MIN_VALUE 819
++#define L1_AVG_PQ_MIN_VALUE_CMV40 1229
++
++struct vframe_hdr_plus_sei {
++	u16 present_flag;
++	u16 itu_t_t35_country_code;
++	u16 itu_t_t35_terminal_provider_code;
++	u16 itu_t_t35_terminal_provider_oriented_code;
++	u16 application_identifier;
++	u16 application_version;
++	/*num_windows max is 3*/
++	u16 num_windows;
++	/*windows xy*/
++	u16 window_upper_left_corner_x[3];
++	u16 window_upper_left_corner_y[3];
++	u16 window_lower_right_corner_x[3];
++	u16 window_lower_right_corner_y[3];
++	u16 center_of_ellipse_x[3];
++	u16 center_of_ellipse_y[3];
++	u16 rotation_angle[3];
++	u16 semimajor_axis_internal_ellipse[3];
++	u16 semimajor_axis_external_ellipse[3];
++	u16 semiminor_axis_external_ellipse[3];
++	u16 overlap_process_option[3];
++	/*target luminance*/
++	u32 tgt_sys_disp_max_lumi;
++	u16 tgt_sys_disp_act_pk_lumi_flag;
++	u16 num_rows_tgt_sys_disp_act_pk_lumi;
++	u16 num_cols_tgt_sys_disp_act_pk_lumi;
++	u16 tgt_sys_disp_act_pk_lumi[25][25];
++
++	/*num_windows max is 3, e.g maxscl[num_windows][i];*/
++	u32 maxscl[3][3];
++	u32 average_maxrgb[3];
++	u16 num_distribution_maxrgb_percentiles[3];
++	u16 distribution_maxrgb_percentages[3][15];
++	u32 distribution_maxrgb_percentiles[3][15];
++	u16 fraction_bright_pixels[3];
++
++	u16 mast_disp_act_pk_lumi_flag;
++	u16 num_rows_mast_disp_act_pk_lumi;
++	u16 num_cols_mast_disp_act_pk_lumi;
++	u16 mast_disp_act_pk_lumi[25][25];
++	/*num_windows max is 3, e.g knee_point_x[num_windows]*/
++	u16 tone_mapping_flag[3];
++	u16 knee_point_x[3];
++	u16 knee_point_y[3];
++	u16 num_bezier_curve_anchors[3];
++	u16 bezier_curve_anchors[3][15];
++	u16 color_saturation_mapping_flag[3];
++	u16 color_saturation_weight[3];
++};
++
++struct hdr_plus_bits_s {
++	u16 len_itu_t_t35_country_code;
++	u16 len_itu_t_t35_terminal_provider_code;
++	u16 len_itu_t_t35_terminal_provider_oriented_code;
++	u16 len_application_identifier;
++	u16 len_application_version;
++	/*num_windows max is 3*/
++	u16 len_num_windows;
++	/*windows xy*/
++	u16 len_window_upper_left_corner_x;
++	u16 len_window_upper_left_corner_y;
++	u16 len_window_lower_right_corner_x;
++	u16 len_window_lower_right_corner_y;
++	u16 len_center_of_ellipse_x;
++	u16 len_center_of_ellipse_y;
++	u16 len_rotation_angle;
++	u16 len_semimajor_axis_internal_ellipse;
++	u16 len_semimajor_axis_external_ellipse;
++	u16 len_semiminor_axis_external_ellipse;
++	u16 len_overlap_process_option;
++	/*target luminance*/
++	u16 len_tgt_sys_disp_max_lumi;
++	u16 len_tgt_sys_disp_act_pk_lumi_flag;
++	u16 len_num_rows_tgt_sys_disp_act_pk_lumi;
++	u16 len_num_cols_tgt_sys_disp_act_pk_lumi;
++	u16 len_tgt_sys_disp_act_pk_lumi;
++
++	/*num_windows max is 3, e.g maxscl[num_windows][i];*/
++	u16 len_maxscl;
++	u16 len_average_maxrgb;
++	u16 len_num_distribution_maxrgb_percentiles;
++	u16 len_distribution_maxrgb_percentages;
++	u16 len_distribution_maxrgb_percentiles;
++	u16 len_fraction_bright_pixels;
++
++	u16 len_mast_disp_act_pk_lumi_flag;
++	u16 len_num_rows_mast_disp_act_pk_lumi;
++	u16 len_num_cols_mast_disp_act_pk_lumi;
++	u16 len_mast_disp_act_pk_lumi;
++	/*num_windows max is 3, e.g knee_point_x[num_windows]*/
++	u16 len_tone_mapping_flag;
++	u16 len_knee_point_x;
++	u16 len_knee_point_y;
++	u16 len_num_bezier_curve_anchors;
++	u16 len_bezier_curve_anchors;
++	u16 len_color_saturation_mapping_flag;
++	u16 len_color_saturation_weight;
++};
++
++static struct hdr_plus_bits_s sei_md_bits = {
++	.len_itu_t_t35_country_code = 8,
++	.len_itu_t_t35_terminal_provider_code = 16,
++	.len_itu_t_t35_terminal_provider_oriented_code = 16,
++	.len_application_identifier = 8,
++	.len_application_version = 8,
++	.len_num_windows = 2,
++	.len_window_upper_left_corner_x = 16,
++	.len_window_upper_left_corner_y = 16,
++	.len_window_lower_right_corner_x = 16,
++	.len_window_lower_right_corner_y = 16,
++	.len_center_of_ellipse_x = 16,
++	.len_center_of_ellipse_y = 16,
++	.len_rotation_angle = 8,
++	.len_semimajor_axis_internal_ellipse = 16,
++	.len_semimajor_axis_external_ellipse = 16,
++	.len_semiminor_axis_external_ellipse = 16,
++	.len_overlap_process_option = 1,
++	.len_tgt_sys_disp_max_lumi = 27,
++	.len_tgt_sys_disp_act_pk_lumi_flag = 1,
++	.len_num_rows_tgt_sys_disp_act_pk_lumi = 5,
++	.len_num_cols_tgt_sys_disp_act_pk_lumi = 5,
++	.len_tgt_sys_disp_act_pk_lumi = 4,
++	.len_maxscl = 17,
++	.len_average_maxrgb = 17,
++	.len_num_distribution_maxrgb_percentiles = 4,
++	.len_distribution_maxrgb_percentages = 7,
++	.len_distribution_maxrgb_percentiles = 17,
++	.len_fraction_bright_pixels = 10,
++	.len_mast_disp_act_pk_lumi_flag = 1,
++	.len_num_rows_mast_disp_act_pk_lumi = 5,
++	.len_num_cols_mast_disp_act_pk_lumi = 5,
++	.len_mast_disp_act_pk_lumi = 4,
++	.len_tone_mapping_flag = 1,
++	.len_knee_point_x = 12,
++	.len_knee_point_y = 12,
++	.len_num_bezier_curve_anchors = 4,
++	.len_bezier_curve_anchors = 10,
++	.len_color_saturation_mapping_flag = 1,
++	.len_color_saturation_weight = 6
++};
++
++static unsigned long last_osd_ioctl_time;
++static unsigned int osd_L5_timeout_ms = 3000;
++
 +/* ---- HDR10+ -> DV generation, ported from the reference ---- */
 +
 +static uint16_t clamp16(uint16_t d, uint16_t min, uint16_t max) {
@@ -1526,7 +1702,7 @@ index 0000000000..eeee0eee0ee0
 +module_param(generate_DV_from_hdr10p, bool, 0664);
 +MODULE_PARM_DESC(generate_DV_from_hdr10p, "\n create DV metadata from HDR10+ SEI\n");
 +
-+#define HDR10PLUS_DV_PAYLOAD_SIZE 117
++
 +
 +static void form_dv_sei_payload_from_hdr10plus(uint8_t *hdr10p_sei_payload, uint16_t payload_size, uint8_t* dm_metadata, uint32_t max_display_mastering_luminance, uint32_t min_display_mastering_luminance){
 +    struct vframe_hdr_plus_sei hdr_plus_data;
@@ -1649,33 +1825,40 @@ index 0000000000..eeee0eee0ee0
 + */
 +void dv_injection_process_frame(struct vframe_s *vf)
 +{
-+	const u8 *payload = NULL;
-+	u32 payload_len = 0;
++	u8 *dv_sei = NULL;
++	u8 *hdr10p_sei = NULL;
++	u16 payload_len;
++	const u8 *payload;
 +	struct dv_inj_slot *slot;
 +
 +	if (!vf || !READ_ONCE(dv_injection_enable))
 +		return;
-+	if (vf->src_fmt.fmt != VFRAME_SIGNAL_FMT_DOVI)
-+		return;
-+	if (dv_injection_find_dv_sei(vf->src_fmt.sei_ptr, vf->src_fmt.sei_size,
-+				     &payload, &payload_len)) {
-+		const u8 *h10p = NULL;
-+		u32 h10p_len = 0;
 +
-+		if (!generate_DV_from_hdr10p ||
-+		    dv_injection_find_hdr10p_sei(vf->src_fmt.sei_ptr,
-+						 vf->src_fmt.sei_size,
-+						 &h10p, &h10p_len))
++	/* Use the reference parser rather than a hand rolled one: it knows the
++	 * exact block layout of both the Dolby Vision SEI (7C 01 FF wrapper) and
++	 * the HDR10+ ITU-T T.35 payload, and returns the payload after the
++	 * wrapper so the generator sees the same bytes as the author's build.
++	 */
++	payload_len = search_sei_for_dynamic_metadata(vf->src_fmt.sei_ptr,
++						      vf->src_fmt.sei_size,
++						      &dv_sei, &hdr10p_sei);
++	payload = dv_sei;
++
++	if (!payload) {
++		if (!generate_DV_from_hdr10p || !hdr10p_sei)
 +			return;
-+		/* Build a DV payload from the HDR10+ metadata and the mastering
-+		 * display luminance, like the reference does. */
-+		form_dv_sei_payload_from_hdr10plus((u8 *)h10p, (u16)h10p_len,
++		dv_injection_log(1, "dv injection: building DV metadata from HDR10+\n");
++		form_dv_sei_payload_from_hdr10plus(hdr10p_sei, payload_len,
 +						   dv_inj_hdr10p_dm,
 +						   vf->prop.master_display_colour.luminance[0],
 +						   vf->prop.master_display_colour.luminance[1]);
 +		payload = dv_inj_hdr10p_dm;
 +		payload_len = HDR10PLUS_DV_PAYLOAD_SIZE;
++		/* Generated metadata means this frame has to be treated as DV so
++		 * the display path picks the slot up. */
++		vf->src_fmt.fmt = VFRAME_SIGNAL_FMT_DOVI;
 +	}
++
 +	if (dv_injection_validate_metadata(payload, payload_len))
 +		return;
 +
