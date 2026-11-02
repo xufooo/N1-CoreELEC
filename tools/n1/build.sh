@@ -67,10 +67,15 @@ elif [ "$target" = kernel ]; then
   ./scripts/build linux 2>&1 | tee output/build.log
   # Publish the kernel image so it can be dropped straight onto
   # /flash/kernel.img on the device instead of reflashing a full image.
-  kernel_img=$(ls -1t build.CoreELEC-Amlogic-ng.arm-21/build/.install_pkg/linux-*/.image/Image* 2>/dev/null | head -1 || true)
+  kernel_img=$(find build.CoreELEC-Amlogic-ng.arm-21 -type f \
+      \( -path "*/.image/Image*" -o -path "*/arch/arm64/boot/Image*" \) \
+      2>/dev/null | head -1 || true)
   if [ -n "${kernel_img:-}" ]; then
+    echo "kernel image: ${kernel_img}" | tee -a output/build.log
     cp "$kernel_img" output/kernel.img
     (cd output && md5sum -t kernel.img > kernel.img.md5)
+  else
+    echo "WARNING: kernel image not found, nothing to publish" | tee -a output/build.log
   fi
 else
   make image 2>&1 | tee output/build.log
