@@ -225,6 +225,47 @@ dv injection: VSIF sent
 6. **4.9 里 `update_vframe_src_fmt()` 普通播放不调用**：参考实现靠它取 SEI，
    在本内核上要靠定时器周期写入（见 4.2）。
 
+### 4.3.7 VSIF 被 HDR10 抢走（2026-11-02 实测根因）
+
+播放 30 秒 4K24 DV 样片、注入开启期间，每秒采样 `/sys/class/amhdmitx/amhdmitx0/hdmi_hdr_status`：
+
+```
+ 1: HDR10-GAMMA_ST2084     ← 视频通路写的
+ 2: DolbyVision-Std        ← 我们写的（确实生效了）
+ 3: HDR10-GAMMA_ST2084     ← 又被抢回
+ 4-8: HDR10
+ 9: DolbyVision-Std
+10: HDR10
+```
+
+同时 dmesg 里 canvas 写入 675 次、`VSIF sent` 675 次——注入本身正常，
+问题是**两条通路在抢 `hdr_status_pos`**：
+
+| 写入者 | 位置 | 值 |
+|---|---|---|
+| `hdmitx_set_drm_pkt()`（HDR10 基础层元数据，视频通路每帧调用） | `hdmi_tx_main.c:1613` | `hdr_status_pos = 1` |
+| `hdmitx_set_vsif_pkt()`（我们的 DV VSIF） | `hdmi_tx_main.c:1863` | `hdr_status_pos = 2` |
+
+P7 流的**基础层就是 HDR10**，所以视频通路一直把状态推回 HDR10，电视绝大多数时间
+看到的是 HDR10 VSIF → 不进 DV（或闪烁）。
+
+**修复**：注入激活时拦截 HDR10 通路。`dv_injection.c` 新增导出函数
+
+```c
+bool dv_injection_block_hdr10(void)
+{
+	return dv_injection_enable && always_send_vsif && dm_metadata_size;
+}
+EXPORT_SYMBOL(dv_injection_block_hdr10);
+```
+
+并在 `hdmi_tx_main.c` 两处加守卫：
+
+- `hdmitx_set_drm_pkt()` 开头：`if (dv_injection_block_hdr10()) return;`
+- `hdmitx_set_vsif_pkt()` 取锁前：`if (type != EOTF_T_DOLBYVISION && dv_injection_block_hdr10()) return;`
+
+这样只有 DV 的 VSIF 能落地，其余（HDR10 / HDR10+）在注入期间被丢弃。
+
 ## 5. 启用步骤（实机）
 
 ```sh

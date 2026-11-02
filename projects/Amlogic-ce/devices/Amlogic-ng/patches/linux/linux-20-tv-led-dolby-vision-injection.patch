@@ -1,46 +1,3 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: N1-CoreELEC project <dev@n1.local>
-Date: Tue, 27 Oct 2026 00:50:00 +0800
-Subject: [PATCH] media: amlogic: add TV-led Dolby Vision metadata injection
-
-TV-led Dolby Vision for SoCs without a licensed Dolby Vision core
-(Phicomm N1 / Amlogic GXL).
-
-The box does not reshape the picture.  Instead the Dolby Vision
-Display Management (DM) metadata is packetised into 128 byte Dolby
-Vision metadata packets (CRC32 in the last four bytes), every bit of
-a packet is turned into one picture pixel, and those pixels are
-written into the top rows of the OSD/GUI canvas.  A Dolby VSIF packet
-is sent alongside, so the TV knows that the signal carries Dolby
-Vision metadata and performs the reshaping itself.
-
-Neither the licensed DV Core hardware nor the dovi.ko blob is
-needed, so this works on GXL where the DV Core registers are not
-even assigned.
-
-The DM metadata bytes are handed over from user space through the
-"dv_metadata" module parameter (hex string); Kodi links libdovi and
-can extract the RPU/DM block from the stream.
-
-The packetisation, CRC and bit-to-pixel encoding follow the publicly
-published reference implementation
-(doppingkoala/common_drivers, drivers/media/video_sink/dv_injection.c),
-adapted to the 4.9 tree: the VSIF is sent with the existing
-vinfo->vout_device->fresh_tx_vsif_pkt() and the metadata is written
-into the OSD canvas obtained with canvas_read().
-
-The feature is compiled in but stays inert until
-"dv_injection_enable" is set, so other devices are unaffected.
-
-Signed-off-by: N1-CoreELEC project <dev@n1.local>
----
-  drivers/amlogic/media/video_sink/Kconfig           |  11 +
-  drivers/amlogic/media/video_sink/Makefile          |   4 +
-  drivers/amlogic/media/video_sink/dv_injection.c    | 488 +++++++++++++++++++++
-  drivers/amlogic/media/video_sink/video.c           |  10 +
-  .../linux/amlogic/media/video_sink/dv_injection.h  |  22 +
-  5 files changed, 535 insertions(+)
-
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
 index 68c8f4b..375e8bd 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
@@ -81,7 +38,7 @@ new file mode 100644
 index 0000000000..1111111111
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,633 @@
+@@ -0,0 +1,646 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -628,6 +585,19 @@ index 0000000000..1111111111
 +}
 +
 +/*
++ * While injection is active the Dolby VSIF has to stay on the wire.  A
++ * profile 7 stream carries an HDR10 base layer, and the video path keeps
++ * re-sending that DRM packet roughly every 100 ms, which wins the race
++ * against our VSIF and leaves the sink in HDR10 (measured: the HDMI
++ * status flipped between HDR10 and DolbyVision-Std once per second).
++ */
++bool dv_injection_block_hdr10(void)
++{
++	return dv_injection_enable && always_send_vsif && dm_metadata_size;
++}
++EXPORT_SYMBOL(dv_injection_block_hdr10);
++
++/*
 + * Feed the DM metadata (raw bytes) from user space.
 + */
 +int dv_injection_set_metadata(const u8 *data, u32 size)
@@ -743,12 +713,49 @@ index a93fd94..e0e90c6 100644
  	return 0;
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
+@@ -27,6 +27,9 @@
+ #include <linux/init.h>
+ #include <linux/device.h>
+ #include <linux/mm.h>
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++#include <linux/amlogic/media/video_sink/dv_injection.h>
++#endif
+ #include <linux/major.h>
+ #include <linux/platform_device.h>
+ #include <linux/pinctrl/consumer.h>
+@@ -1612,6 +1615,11 @@
+ struct master_display_info_s drm_config_data;
+ static void hdmitx_set_drm_pkt(struct master_display_info_s *data)
+ {
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* the Dolby VSIF must survive the HDR10 base layer of a DV stream */
++	if (dv_injection_block_hdr10())
++		return;
++#endif
+ 	struct hdmitx_dev *hdev = &hdmitx_device;
+ 	struct hdr_info *hdr_info = &hdev->rxcap.hdr_info;
+ 	unsigned char DRM_HB[3] = {0x87, 0x1, 26};
+@@ -1877,6 +1885,11 @@
+ 	unsigned long flags = 0;
+ 
+ 	hdmi_debug();
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* anything but Dolby Vision would override the injected VSIF */
++	if (type != EOTF_T_DOLBYVISION && dv_injection_block_hdr10())
++		return;
++#endif
+ 	spin_lock_irqsave(&hdev->edid_spinlock, flags);
+ 	if (hdev->bist_lock) {
+ 		spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
 index 0000000..85f73aa
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,23 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -766,6 +773,7 @@ index 0000000..85f73aa
 + * Dolby VSIF alive; called for every frame by the video sink
 + */
 +void dv_injection_process_frame(struct vframe_s *vf);
++bool dv_injection_block_hdr10(void);
 +
 +/* hand over the raw DM metadata bytes (user space / Kodi) */
 +int dv_injection_set_metadata(const u8 *data, u32 size);
