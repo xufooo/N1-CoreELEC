@@ -79,10 +79,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..4444444444
+index 0000000000..5555555555
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,1984 @@
+@@ -0,0 +1,1997 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -881,8 +881,13 @@ index 0000000000..4444444444
 +	vsif.vers.ver2.dobly_vision_signal = 1;	/* DV STD */
 +	vsif.vers.ver2.low_latency = 0;
 +
++	/* The author's driver maps RGB_8BIT to YUV422 + 12-bit output, but the
++	 * 4.9 driver maps RGB_8BIT to YUV444 + 8-bit (COLORDEPTH_24B).  The DM
++	 * rides in the low bits of 12-bit samples, so ask for the tunnel mode
++	 * that this driver turns into 422/36-bit: YUV422_BIT12.
++	 */
 +	vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_DOLBYVISION,
-+					      RGB_8BIT, &vsif, false);
++					      YUV422_BIT12, &vsif, false);
 +	dv_injection_log(2, "dv injection: VSIF sent\n");
 +	return 0;
 +}
@@ -1891,8 +1896,13 @@ index 0000000000..4444444444
 +	payload = dv_sei;
 +
 +	if (!payload) {
-+		if (!generate_DV_from_hdr10p || !hdr10p_sei)
++		if (!generate_DV_from_hdr10p || !hdr10p_sei) {
++			/* F5: a frame without metadata must not keep an old slot
++			 * alive for this decoder index. */
++			WRITE_ONCE(dv_inj_pool[vf->index &
++					      (DV_INJ_POOL_SIZE - 1)].valid, false);
 +			return;
++		}
 +		dv_injection_log(1, "dv injection: building DV metadata from HDR10+\n");
 +		memcpy(dv_inj_hdr10p_dm, dv_inj_hdr10p_template,
 +		       sizeof(dv_inj_hdr10p_dm));
@@ -1907,8 +1917,11 @@ index 0000000000..4444444444
 +		vf->src_fmt.fmt = VFRAME_SIGNAL_FMT_DOVI;
 +	}
 +
-+	if (dv_injection_validate_metadata(payload, payload_len))
++	if (dv_injection_validate_metadata(payload, payload_len)) {
++		WRITE_ONCE(dv_inj_pool[vf->index &
++				      (DV_INJ_POOL_SIZE - 1)].valid, false);
 +		return;
++	}
 +
 +	/* Level 5 (active area) and Level 1 (luminance) are adjusted per frame,
 +	 * exactly like the reference implementation does before packing. */
