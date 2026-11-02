@@ -79,10 +79,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..aaaa1111aaaa
+index 0000000000..bbbb2222bbbb
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2090 @@
+@@ -0,0 +1,2115 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -961,6 +961,31 @@ index 0000000000..aaaa1111aaaa
 +		vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_NULL, RGB_8BIT,
 +						      NULL, true);
 +}
++
++/*
++ * F5/F6: called from the video provider lifecycle (unreg, reset, light unreg).
++ * A new stream means every cached slot belongs to the previous one: bump the
++ * generation and hand the output back instead of letting a leftover frame
++ * keep the DV signal asserted.
++ */
++void dv_injection_new_stream(void)
++{
++	unsigned long flags;
++
++	if (!READ_ONCE(dv_injection_enable))
++		return;
++	mutex_lock(&dv_injection_lock);
++	WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	dv_injection_release_output();
++	mutex_unlock(&dv_injection_lock);
++	dv_injection_log(1, "dv injection: new stream generation\n");
++}
++EXPORT_SYMBOL(dv_injection_new_stream);
++
++
 +
 +/*
 + * Interrupt context (vsync).  No mutex, no console_lock, no allocation:
@@ -2202,7 +2227,36 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  	/* process cur frame for each vsync */
  	if (dispbuf) {
  		int need_afbc =
-@@ -7787,6 +7799,13 @@
+@@ -7186,6 +7198,11 @@
+ static int video_receiver_event_fun(int type, void *data, void *private_data)
+ {
+ 	if (type == VFRAME_EVENT_PROVIDER_UNREG) {
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++		/* A stopped provider starts a new stream generation and hands the
++		 * output back, so leftover frame slots cannot keep DV alive. */
++		dv_injection_new_stream();
++#endif
+ 		video_vf_unreg_provider();
+ 		drop_frame_count = 0;
+ 		receive_frame_count = 0;
+@@ -7214,10 +7231,16 @@
+ #endif
+ 		update_process_hdmi_avsync_flag(false);
+ 	} else if (type == VFRAME_EVENT_PROVIDER_RESET) {
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++		dv_injection_new_stream();	/* seek/reset: no stale slots */
++#endif
+ 		video_vf_light_unreg_provider(1);
+ 		omx_cur_session = 0xffffffff;
+ 		nn_scenes_value[0].maxprob = 0;
+ 	} else if (type == VFRAME_EVENT_PROVIDER_LIGHT_UNREG) {
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++		dv_injection_new_stream();
++#endif
+ 		video_vf_light_unreg_provider(0);
+ 		nn_scenes_value[0].maxprob = 0;
+ 	} else if (type == VFRAME_EVENT_PROVIDER_REG) {
+@@ -7787,6 +7810,13 @@
  	if (vf->src_fmt.fmt != VFRAME_SIGNAL_FMT_DOVI)
  		clear_vframe_dovi_md_info(vf);
  
@@ -2262,10 +2316,10 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  					case RGB_10_12BIT:
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..9999999999
+index 0000000000..cccc3333cccc
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,26 @@
+@@ -0,0 +1,27 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -2286,6 +2340,7 @@ index 0000000000..9999999999
 +bool dv_injection_render_frame(struct vframe_s *vf);
 +bool dv_injection_block_hdr10(void);
 +bool dv_injection_force_422_12(void);
++void dv_injection_new_stream(void);
 +void dv_injection_note_osd_activity(void);
 +
 +/* hand over the raw DM metadata bytes (user space / Kodi) */
