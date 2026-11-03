@@ -151,10 +151,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..dead3333dead
+index 0000000000..aaa11111aaa
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2276 @@
+@@ -0,0 +1,2353 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -185,6 +185,7 @@ index 0000000000..dead3333dead
 +#include <linux/version.h>
 +#include <linux/kernel.h>
 +#include <linux/module.h>
++#include <linux/delay.h>
 +#include <linux/moduleparam.h>
 +#include <linux/workqueue.h>
 +#include <linux/timer.h>
@@ -378,6 +379,12 @@ index 0000000000..dead3333dead
 +static bool dv_inj_transport_requested;
 +static bool dv_inj_transport_ready;
 +static u32 dv_inj_mode_generation;
++/* R2: how many display callbacks are inside a commit right now.  Stopping the
++ * stream forbids new comers first, then waits for these to drain, so a frame
++ * already holding a snapshot cannot re-take the output afterwards.
++ */
++static int dv_inj_render_busy;
++static bool dv_inj_release_needed;
 +/* R6: set by the provider REG path, cleared on UNREG/RESET.  The display side
 + * refuses to re-take the output when no stream is running, and the producer
 + * only publishes into the generation it started with.
@@ -987,6 +994,7 @@ index 0000000000..dead3333dead
 +				      enum mode_type tunnel_mode,
 +				      struct dv_vsif_para *data, bool signal_sdr);
 +extern int hdmitx_prepare_output_for_injection(void);
++extern bool hdmitx_transport_is_422_12(void);
 +
 +static int dv_injection_send_vsif(const struct vinfo_s *vinfo)
 +{
@@ -1111,6 +1119,32 @@ index 0000000000..dead3333dead
 + * watchdog only re-binds a canvas that reached this point, so it cannot revive
 + * the address that was valid before the switch.
 + */
++
++/*
++ * R1: called by the driver when the output is torn down - HPD, a mode change
++ * or an internal reset sets hdev->ready = 0.  The transport contract no longer
++ * holds, so the module stops claiming the output until preparation succeeds
++ * again.
++ */
++void dv_injection_notify_output_lost(void)
++{
++	unsigned long flags;
++
++	if (!READ_ONCE(dv_injection_enable))
++		return;
++	/* This can be reached from output teardown paths that are not allowed to
++	 * sleep, so it only revokes state here and lets the watchdog finish the
++	 * handover in process context.
++	 */
++	WRITE_ONCE(dv_inj_transport_ready, false);
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	WRITE_ONCE(dv_inj_rt.ready, false);
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	WRITE_ONCE(dv_inj_release_needed, true);
++	WRITE_ONCE(dv_inj_canvas_dirty, true);
++}
++EXPORT_SYMBOL(dv_injection_notify_output_lost);
++
 +void dv_injection_note_canvas_committed(void)
 +{
 +	if (!READ_ONCE(dv_injection_enable))
@@ -1132,10 +1166,16 @@ index 0000000000..dead3333dead
 +void dv_injection_new_stream(void)
 +{
 +	unsigned long flags;
++	int i;
 +
 +	if (!READ_ONCE(dv_injection_enable))
 +		return;
 +	WRITE_ONCE(dv_inj_stream_running, false);
++	/* R2: let any commit already in progress finish before the slots and the
++	 * output state are torn down.
++	 */
++	for (i = 0; i < 50 && READ_ONCE(dv_inj_render_busy) > 0; i++)
++		usleep_range(1000, 2000);
 +	mutex_lock(&dv_injection_lock);
 +	WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
@@ -1153,6 +1193,16 @@ index 0000000000..dead3333dead
 + * Interrupt context (vsync).  No mutex, no console_lock, no allocation:
 + * only the prepared pixels and the resolved canvas are touched.
 + */
++static void dv_inj_render_exit(void)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	if (dv_inj_render_busy > 0)
++		dv_inj_render_busy--;
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++}
++
 +static unsigned long dv_injection_torn_frames;
 +
 +static void dv_injection_output_seen_bad_frame(void)
@@ -1186,6 +1236,7 @@ index 0000000000..dead3333dead
 +	 * slot, and nothing may be written into the OSD before this check passes.
 +	 */
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	dv_inj_render_busy++;
 +	ok = READ_ONCE(slot->valid) && READ_ONCE(dv_inj_rt.ready) &&
 +	     READ_ONCE(dv_inj_transport_ready) &&
 +	     READ_ONCE(dv_inj_stream_running) &&
@@ -1197,8 +1248,12 @@ index 0000000000..dead3333dead
 +		snap->generation = slot->generation;
 +	}
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
-+	if (!ok)
++	if (!ok) {
++		spin_lock_irqsave(&dv_inj_publish_lock, flags);
++		dv_inj_render_busy--;
++		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +		return false;
++	}
 +
 +	/* R3: the OSD copy runs under the publish lock so a canvas change or a
 +	 * buffer release can drain it by taking the same lock.
@@ -1208,19 +1263,23 @@ index 0000000000..dead3333dead
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	if (copy_failed) {
 +		dv_injection_release_output();
++		dv_inj_render_exit();
 +		return false;
 +	}
 +	/* R2: the stream can stop between the snapshot and the commit. */
 +	if (snap->generation != READ_ONCE(dv_inj_generation) ||
 +	    !READ_ONCE(dv_inj_stream_running)) {
 +		dv_injection_release_output();
++		dv_inj_render_exit();
 +		return false;
 +	}
 +	if (always_send_vsif && dv_injection_send_vsif(vinfo)) {
 +		dv_injection_release_output();
++		dv_inj_render_exit();
 +		return false;
 +	}
 +	WRITE_ONCE(dv_injection_active, true);
++	dv_inj_render_exit();
 +	return true;
 +}
 +
@@ -1266,6 +1325,12 @@ index 0000000000..dead3333dead
 +{
 +	if (!READ_ONCE(dv_injection_enable))
 +		return;
++	if (READ_ONCE(dv_inj_release_needed)) {
++		WRITE_ONCE(dv_inj_release_needed, false);
++		mutex_lock(&dv_injection_lock);
++		dv_injection_release_output();
++		mutex_unlock(&dv_injection_lock);
++	}
 +	if (READ_ONCE(dv_injection_active) && !get_video_enabled()) {
 +		mutex_lock(&dv_injection_lock);
 +		dv_injection_release_output();
@@ -1327,6 +1392,18 @@ index 0000000000..dead3333dead
 +			*(bool *)kp->arg = false;
 +			mutex_unlock(&dv_injection_lock);
 +			return ret;
++		}
++		/* R1: do not trust the request - confirm the driver really ended
++		 * up on 422/12-bit before publishing transport readiness.
++		 */
++		if (!hdmitx_transport_is_422_12()) {
++			dv_injection_log(0,
++					 "dv injection: transport is not 422/12-bit\n");
++			mutex_lock(&dv_injection_lock);
++			WRITE_ONCE(dv_inj_transport_requested, false);
++			*(bool *)kp->arg = false;
++			mutex_unlock(&dv_injection_lock);
++			return -EAGAIN;
 +		}
 +		WRITE_ONCE(dv_inj_mode_generation,
 +			   READ_ONCE(dv_inj_mode_generation) + 1);
@@ -2535,10 +2612,11 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type
  	tunnel_mode, struct dv_vsif_para *data, bool switch_to_sdr);
  static void hdmitx_set_hdr10plus_pkt(unsigned int flag,
-@@ -103,6 +110,40 @@
+@@ -102,7 +109,55 @@
+ 	.frac_rate_policy = 1,
  	.cec_func_config = 0x7f
  };
- 
++
 +/*
 + * F7: hdmitx_set_vsif_pkt() returns void and bails out silently while the
 + * synthesizer is not ready or while a BIST pattern owns the output.  The
@@ -2571,12 +2649,52 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
 +	return set_disp_mode_auto();
 +}
 +EXPORT_SYMBOL(hdmitx_prepare_output_for_injection);
+ 
++
++/* R1: what the driver actually ended up programming.  enable() uses this to
++ * confirm the 422/12-bit contract instead of assuming the request worked.
++ */
++bool hdmitx_transport_is_422_12(void)
++{
++	struct hdmi_format_para *para = hdmitx_device.para;
++
++	return para && para->cs == COLORSPACE_YUV422 &&
++	       para->cd == COLORDEPTH_36B;
++}
++EXPORT_SYMBOL(hdmitx_transport_is_422_12);
++
 +
 +
  static const struct dv_info dv_dummy;
  static int log_level;
  static bool dovi_tv_led_bt2020 = false;
-@@ -677,6 +718,24 @@
+@@ -374,6 +429,12 @@
+ 		hdev->debug_param.avmute_frame * hdmitx_get_frame_duration();
+ 
+ 	hdev->ready = 0;
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* R1: HPD/mode teardown - the injection transport contract no
++	 * longer holds until it is prepared again.
++	 */
++	dv_injection_notify_output_lost();
++#endif
+ 	hdev->hwop.cntlmisc(hdev, MISC_AVMUTE_OP, SET_AVMUTE);
+ 	if (hdev->debug_param.avmute_frame > 0)
+ 		msleep(mute_us / 1000);
+@@ -615,6 +676,12 @@
+ 
+ 	memset(mode, 0, sizeof(mode));
+ 	hdev->ready = 0;
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* R1: HPD/mode teardown - the injection transport contract no
++	 * longer holds until it is prepared again.
++	 */
++	dv_injection_notify_output_lost();
++#endif
+ 
+ 	/* get current vinfo */
+ 	info = hdmitx_get_current_vinfo();
+@@ -677,6 +744,24 @@
  	hdev->para = para;
  	vic = hdmitx_edid_get_VIC(hdev, mode, 1);
  
@@ -2601,7 +2719,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  	// force colour subsampling when DV mode
  	switch (hdev->hdmi_current_eotf_type) {
  		case EOTF_T_DOLBYVISION:
-@@ -686,6 +745,17 @@
+@@ -686,6 +771,17 @@
  				int cs = para->cs;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
@@ -2619,7 +2737,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  					case RGB_10_12BIT:
  						para->cs = COLORSPACE_YUV444;
  						break;
-@@ -718,6 +788,13 @@
+@@ -718,6 +814,13 @@
  				int cd = para->cd;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
@@ -2633,7 +2751,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  							para->cd = COLORDEPTH_24B;
  						break;
  					case RGB_10_12BIT:
-@@ -1860,7 +1937,7 @@
+@@ -1860,7 +1963,7 @@
  struct vsif_debug_save vsif_debug_info;
  struct vsif_debug_save hsty_vsif_config_data[8];
  unsigned int hsty_vsif_config_loc, hsty_vsif_config_num;
@@ -2642,7 +2760,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  	enum mode_type tunnel_mode, struct dv_vsif_para *data, bool signal_sdr)
  {
  	struct hdmitx_dev *hdev = &hdmitx_device;
-@@ -1874,12 +1951,9 @@
+@@ -1874,12 +1977,9 @@
  	static enum eotf_type ltype = EOTF_T_NULL;
  	static uint8_t ltmode = -1;
  	enum hdmi_tf_type hdr_type = HDMI_NONE;
@@ -2655,7 +2773,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  	if (data == NULL)
-@@ -1904,7 +1978,6 @@
+@@ -1904,7 +2004,6 @@
  	if (hdev->ready == 0) {
  		ltype = EOTF_T_NULL;
  		ltmode = -1;
@@ -2663,7 +2781,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  	if (hdev->rxcap.dv_info.ieeeoui != DV_IEEE_OUI) {
-@@ -1913,7 +1986,6 @@
+@@ -1913,7 +2012,6 @@
  	}
  	if ((hdev->chip_type) < MESON_CPU_ID_GXL) {
  		pr_info("hdmitx: not support DolbyVision\n");
@@ -2671,7 +2789,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  
-@@ -1984,7 +2056,6 @@
+@@ -1984,7 +2082,6 @@
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB1, VEN_HB);
@@ -2679,7 +2797,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  			return;
  		}
  		if (type == EOTF_T_DOLBYVISION) {
-@@ -2102,7 +2173,6 @@
+@@ -2102,7 +2199,6 @@
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB2, VEN_HB);
@@ -2687,13 +2805,13 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  			return;
  		}
  		/*Dolby Vision standard case*/
-@@ -2200,9 +2270,38 @@
+@@ -2200,8 +2296,37 @@
  			}
  		}
  	}
 -	spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
- }
- 
++}
++
 +/* R7: the lock-free body is shared by the original void API and the new
 + * checked entry, so readiness and acceptance are decided under one lock.
 + */
@@ -2721,18 +2839,17 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
 +	__hdmitx_set_vsif_pkt_locked(type, tunnel_mode, data, signal_sdr);
 +	spin_unlock_irqrestore(&hdmitx_device.edid_spinlock, flags);
 +	return 0;
-+}
+ }
 +EXPORT_SYMBOL(hdmitx_set_vsif_pkt_checked);
-+
+ 
  struct hdr10plus_para hdr10p_config_data;
  struct hdr10plus_para hsty_hdr10p_config_data[8];
- unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..feed4444feed
+index 0000000000..bbb22222bbb
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,31 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -2757,6 +2874,7 @@ index 0000000000..feed4444feed
 +void dv_injection_stream_started(void);
 +void dv_injection_note_canvas_change(void);
 +void dv_injection_note_canvas_committed(void);
++void dv_injection_notify_output_lost(void);
 +void dv_injection_note_osd_activity(void);
 +
 +/* hand over the raw DM metadata bytes (user space / Kodi) */
