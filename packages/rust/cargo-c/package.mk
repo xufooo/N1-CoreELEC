@@ -21,12 +21,31 @@ PKG_TOOLCHAIN="manual"
 # the build reproducible against crates.io publishing newer crates.
 CARGO_MSRV_POLICY="fallback"
 
-make_host() {
+# The MSRV aware resolver cannot help with crates that under-declare their
+# MSRV.  ignore >= 0.4.24 is edition 2024 and uses let-chains, which need
+# rustc 1.88+, yet it declares no rust-version at all, so the resolver happily
+# selects 0.4.30 and the build dies with
+#   error[E0658]: `let` expressions in this position are unstable
+# ignore 0.4.23 is the last release that is still edition 2021 and free of
+# let-chains; the same version is already compiled successfully elsewhere in
+# this build (cargo 0.69.1 from the rust package ships it in its own lockfile).
+CARGO_IGNORE_PIN="0.4.23"
+
+cargo_prepare_lock() {
   export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS="${CARGO_MSRV_POLICY}"
+  if [ ! -f "${PKG_BUILD}/Cargo.lock" ]; then
+    cargo generate-lockfile --manifest-path ${PKG_BUILD}/Cargo.toml
+  fi
+  cargo update --manifest-path ${PKG_BUILD}/Cargo.toml -p ignore --precise ${CARGO_IGNORE_PIN} || \
+    echo "warning: could not pin ignore to ${CARGO_IGNORE_PIN} (not in the graph?)"
+}
+
+make_host() {
+  cargo_prepare_lock
   cargo build --release --manifest-path ${PKG_BUILD}/Cargo.toml
 }
 
 makeinstall_host() {
-  export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS="${CARGO_MSRV_POLICY}"
+  cargo_prepare_lock
   cargo install --profile release --path ${PKG_BUILD}
 }
