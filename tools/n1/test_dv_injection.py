@@ -26,7 +26,17 @@ def source():
 
 
 def function(text, name):
-    pos = text.index(name + "(")
+    # Skip forward declarations: take the occurrence that is a definition.
+    pos = -1
+    while True:
+        pos = text.index(name + "(", pos + 1)
+        line_start = text.rfind("\n", 0, pos) + 1
+        prefix = text[line_start:pos].strip()
+        in_comment = prefix.startswith(("/*", "*", "//"))
+        semi = text.find(";", pos)
+        brace = text.find("{", pos)
+        if brace != -1 and (semi == -1 or brace < semi) and not in_comment:
+            break
     start = text.rfind("\n", 0, pos) + 1
     opening = text.index("{", pos)
     depth = 1
@@ -50,10 +60,10 @@ typedef uint8_t u8; typedef uint32_t u32; typedef uint64_t u64;
 #define DV_INJ_NUM_HDR_DM_PACKET_REPEATS 3
 #define DV_INJ_PIXELS_PER_PKT 1024
 #define READ_ONCE(x) (x)
+#define __iomem
 #define WRITE_ONCE(x,v) ((x)=(v))
 #define DV_INJ_INTERVAL_MS 100
 #define jiffies 0
-#define msecs_to_jiffies(x) (x)
 #define RGB_8BIT 0
 #define EOTF_T_NULL 0
 struct work_struct { int unused; };
@@ -61,7 +71,7 @@ struct kernel_param { void *arg; };
 struct dv_info { unsigned ieeeoui; };
 struct vout_device_s { struct dv_info *dv_info;
     int (*fresh_tx_vsif_pkt)(int,int,void*,bool); };
-struct vinfo_s { struct vout_device_s *vout_device; };
+struct vinfo_s { struct vout_device_s *vout_device; int width; int height; };
 static bool dv_injection_enable, dv_injection_active, dv_inj_ready;
 static unsigned dm_metadata_size, dv_injection_path;
 static bool always_send_vsif = true;
@@ -91,15 +101,16 @@ static bool dv_inj_transport_requested;
 static int dv_inj_render_busy;
 static bool dv_inj_release_needed;
 static void dv_inj_render_exit(void) { if (dv_inj_render_busy > 0) dv_inj_render_busy--; }
-static void usleep_range(unsigned long a, unsigned long b) { (void)a; (void)b; }
+struct dv_inj_candidate { void *base; unsigned long long page_bytes; u32 pages; u32 gen; };
+enum dv_inj_state { DV_INJ_IDLE = 0, DV_INJ_PREPARING, DV_INJ_READY, DV_INJ_CLOSING };
+static int dv_inj_state;
+static bool dv_inj_accepting;
+static bool dv_inj_pending, dv_inj_pending_clear, dv_inj_pending_restore;
+static u32 dv_inj_pending_gen;
 static bool dv_inj_transport_ready;
 static u32 dv_inj_mode_generation;
 static void dv_injection_log(int level, const char *fmt, ...) { (void)level; (void)fmt; }
 
-static bool dv_injection_force_422_12(void) { return dv_injection_enable; }
-static int hdmitx_prepare_output_for_injection(void) { return 0; }
-static bool hdmitx_transport_is_422_12(void) { return true; }
-static void dv_injection_release_output(void);
 static unsigned long dv_injection_torn_frames;
 static void dv_injection_output_seen_bad_frame(void) { dv_injection_torn_frames++; }
 
@@ -108,9 +119,7 @@ struct dv_inj_runtime { bool ready; void *base; u32 page_bytes; u32 pages; };
 static struct dv_inj_runtime dv_inj_rt;
 static int resolve_result = 0, copy_result = 0;
 static int released = 0;
-static int dv_injection_resolve_canvas(const struct vinfo_s *v) { return resolve_result; }
 static int dv_injection_copy_pixels(const struct dv_inj_slot *s) { return copy_result; }
-static void dv_injection_release_output(void) { released++; dv_injection_active = false; }
 static int video_on=1, canvas_result=0, send_result=0, off_packets=0, cancelled=0;
 static struct dv_info sink={0x00d046};
 static int tx_packet(int type,int mode,void *data,bool restore) {
@@ -118,7 +127,84 @@ static int tx_packet(int type,int mode,void *data,bool restore) {
     return 0;
 }
 static struct vout_device_s device={&sink,tx_packet};
-static struct vinfo_s video={&device};
+
+/* ---- hardware and scheduler stand-ins (real logic lives in the module) ---- */
+static u32 dv_inj_buffer_generation;
+static bool dv_inj_canvas_committed, dv_inj_canvas_dirty;
+struct canvas_s { unsigned long addr; unsigned int width; unsigned int height; };
+struct fb_fix_screeninfo_s { unsigned long smem_start; unsigned int smem_len; unsigned int line_length; };
+struct fb_var_screeninfo_s { unsigned int xres, yres, yres_virtual, bits_per_pixel; };
+struct fb_info {
+	u8 *screen_base;
+	struct fb_fix_screeninfo_s fix;
+	struct fb_var_screeninfo_s var;
+};
+static struct fb_info fb0;
+static struct fb_info *registered_fb[1] = { &fb0 };
+static int lock_fb_info(struct fb_info *i) { (void)i; return 1; }
+static void unlock_fb_info(struct fb_info *i) { (void)i; }
+static void console_lock(void) {}
+static void console_unlock(void) {}
+static unsigned int osd_canvas = 0x40;
+static unsigned int bytes_per_pixel = 4;
+static unsigned int packet_repeat = 1;
+static unsigned int osd_pixel_offset;
+static void canvas_read(unsigned int idx, struct canvas_s *cs)
+{
+	(void)idx;
+	cs->addr = fb0.fix.smem_start;
+	cs->width = fb0.fix.line_length;
+	cs->height = fb0.var.yres_virtual;
+}
+static int prepare_result = 0, transport_ok = 1, prepare_calls = 0;
+static int force422_during_prepare = -1;
+static bool dv_injection_force_422_12(void);
+static void dv_injection_notify_output_lost(void);
+static int hdmitx_prepare_output_for_injection(void)
+{
+	prepare_calls++;
+	/* What the driver would ask while programming: the transport must not be
+	 * requested during a restore.
+	 */
+	force422_during_prepare = dv_injection_force_422_12();
+	/* The real helper clears hdev->ready inside this call, which notifies the
+	 * module exactly like an HPD would.  Reproduce it so the tests cannot
+	 * silently pass without the notification.
+	 */
+	dv_injection_notify_output_lost();
+	return prepare_result;
+}
+static bool hdmitx_transport_is_422_12(void) { return transport_ok; }
+static unsigned long msecs_to_jiffies(unsigned long ms) { return ms; }
+static void usleep_range(unsigned long a, unsigned long b) { (void)a; (void)b; }
+static bool dv_inj_change_in_progress, dv_inj_in_prepare;
+static bool dv_inj_user_wants, dv_inj_lost_during_prepare;
+static u32 dv_inj_session;
+static int deactivated_calls = 0;
+static void dv_injection_deactivate(void);
+static void dv_injection_release_output(void) { released++; dv_injection_active = false; }
+static void dv_injection_begin_close(bool, bool);
+static void dv_injection_begin_close_locked(bool, bool);
+
+static struct vinfo_s video={&device,1920,1080};
+static int dv_injection_build_candidate(const struct vinfo_s *vinfo, struct dv_inj_candidate *cand);
+static int dv_injection_resolve_canvas(const struct vinfo_s *vinfo);
+
+static u8 fb_storage[48 << 20];
+static void fb_init(void)
+{
+	fb0.screen_base = fb_storage;
+	fb0.fix.smem_start = 0x10000000UL;
+	fb0.fix.smem_len = sizeof(fb_storage);
+	fb0.fix.line_length = 7680;
+	fb0.var.xres = 1920;
+	fb0.var.yres = 1080;
+	fb0.var.yres_virtual = 3240;
+	fb0.var.bits_per_pixel = 32;
+	video.width = 1920;
+	video.height = 1080;
+}
+
 static const struct vinfo_s *get_current_vinfo(void) { return &video; }
 static u32 get_video_enabled(void) { return video_on; }
 static void mutex_lock(void *p) {}
@@ -131,6 +217,25 @@ static int param_set_bool(const char *s,const struct kernel_param *p) {
 }
 static int dv_injection_write_canvas(const struct vinfo_s *v) { return canvas_result; }
 static int dv_injection_send_vsif(const struct vinfo_s *v) { return send_result; }
+'''
+
+STUBS = r'''
+static int dv_injection_build_candidate(const struct vinfo_s *vinfo, struct dv_inj_candidate *cand)
+{
+	(void)vinfo;
+	memset(cand, 0, sizeof(*cand));
+	cand->gen = dv_inj_buffer_generation;
+	cand->page_bytes = 8294400;
+	cand->pages = 3;
+	return resolve_result;
+}
+static int dv_injection_resolve_canvas(const struct vinfo_s *vinfo)
+{
+	struct dv_inj_candidate c;
+	if (dv_injection_build_candidate(vinfo, &c))
+		return -EINVAL;
+	return dv_injection_publish_candidate(&c);
+}
 '''
 
 MAIN = r'''
@@ -177,9 +282,14 @@ static void test_layout(void) {
         UINT64_MAX,1,1,&page,&pages)==-EINVAL);
 }
 static void reset(void) {
+    fb_init();
+    dv_inj_ready=true;
+    dv_inj_state=DV_INJ_IDLE; dv_inj_pending=false; dv_inj_render_busy=0;
+    dv_inj_change_in_progress=false; dv_inj_canvas_committed=false;
     dv_injection_enable=true; dv_injection_active=false;
     dv_inj_stream_running=true; dv_inj_transport_requested=true;
     dv_inj_transport_ready=true; dv_inj_mode_generation=0;
+    dv_inj_accepting=true; dv_inj_state=DV_INJ_READY;
     dm_metadata_size=181; dv_injection_path=0;
     always_send_vsif=true; sink.ieeeoui=0x00d046;
     video_on=1; canvas_result=0; send_result=0;
@@ -243,11 +353,238 @@ static void test_lifecycle(void) {
     assert(!dv_injection_block_hdr10() && !dv_inj_rt.ready);
     assert(!dv_injection_render_slot(&slot));
 }
+
+static void test_state_machine(void) {
+    struct kernel_param kp={0};
+    kp.arg = &dv_injection_enable;   /* module_param binds the public bit */
+    u32 t1,t2;
+
+    /* Cold start: IDLE with no change history must reach READY. */
+    reset();
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE;
+    dv_inj_pending=false; dv_inj_accepting=false; dv_inj_transport_ready=false;
+    dv_inj_rt.ready=false; dv_injection_active=false;
+    resolve_result=0; prepare_result=0; transport_ok=1; prepare_calls=0;
+    assert(!dv_injection_enable_set("1",&kp));
+    assert(dv_injection_enable && dv_inj_state==DV_INJ_READY);
+    assert(dv_inj_accepting && dv_inj_rt.ready && dv_inj_transport_ready);
+
+    /* A closing transaction owns the output: enabling during it is refused. */
+    dv_injection_begin_close(true,true);
+    assert(!dv_injection_enable && dv_inj_state==DV_INJ_CLOSING && dv_inj_pending);
+    assert(dv_injection_enable_set("1",&kp)==-EAGAIN);
+    assert(dv_inj_user_wants);   /* the request is remembered for later */
+
+    /* No resume after this close: the user is not asking for injection. */
+    dv_inj_user_wants=false;
+
+    /* An in-flight commit defers the transaction. */
+    dv_inj_render_busy=1;
+    dv_inj_watchdog_fn(NULL);
+    assert(dv_inj_pending && dv_inj_state==DV_INJ_CLOSING);
+    dv_inj_render_busy=0;
+
+    /* A failing physical restore keeps the transaction alive and retries. */
+    prepare_result=-EIO;
+    dv_inj_watchdog_fn(NULL);
+    assert(dv_inj_pending && dv_inj_state==DV_INJ_CLOSING);
+    assert(!dv_injection_enable);
+
+    /* Once it succeeds the transaction ends. */
+    prepare_result=0;
+    dv_inj_watchdog_fn(NULL);
+    assert(!dv_inj_pending && dv_inj_state==DV_INJ_IDLE);
+
+    /* Completion tokens: only the current change may be committed. */
+    t1 = dv_injection_note_canvas_change();
+    t2 = dv_injection_note_canvas_change();
+    assert(t2 == t1 + 1);
+    assert(dv_injection_note_canvas_committed(t1) == -EAGAIN);
+    assert(!dv_inj_canvas_committed);
+    assert(!dv_injection_note_canvas_committed(t2));
+    assert(dv_inj_canvas_committed && !dv_inj_change_in_progress);
+
+    /* A canvas whose change has not completed must not be published. */
+    {
+        struct dv_inj_candidate c;
+        (void)dv_injection_note_canvas_change();
+        memset(&c,0,sizeof(c));
+        c.gen = dv_inj_buffer_generation; c.page_bytes = 8294400; c.pages = 3;
+        dv_inj_transport_requested=true;
+        assert(dv_injection_publish_candidate(&c) == -EAGAIN);
+        dv_inj_transport_requested=false;
+    }
+
+
+    /* A closing transaction must not request the injection transport: the
+     * restore has to run with the request cleared. */
+    {
+        unsigned long f;
+        dv_inj_state = DV_INJ_READY; dv_injection_enable = true;
+        dv_inj_transport_requested = true; dv_injection_active = false;
+        dv_injection_begin_close(true, true);
+        assert(!dv_inj_transport_requested);
+        assert(!dv_injection_force_422_12());
+        (void)f;
+    }
+
+    /* Real stop -> close -> REG -> worker resume, without faking intent. */
+    reset();
+    kp.arg = &dv_injection_enable;
+    prepare_result = 0; transport_ok = 1; resolve_result = 0;
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE; dv_inj_pending=false;
+    dv_inj_user_wants=true;          /* the user enabled it once */
+    assert(!dv_injection_enable_set("1",&kp));
+    assert(dv_inj_state==DV_INJ_READY && dv_injection_enable);
+
+    /* Provider stops: intent stays, public bit drops, close is scheduled. */
+    dv_injection_new_stream();
+    assert(!dv_inj_stream_running);
+    assert(dv_inj_state==DV_INJ_CLOSING && dv_inj_pending);
+    assert(!dv_injection_enable);
+    assert(dv_inj_user_wants);       /* stop keeps the user intent */
+
+    /* The close completes while the provider is gone: no resume. */
+    prepare_result=0;
+    dv_inj_watchdog_fn(NULL);
+    assert(!dv_inj_pending && dv_inj_state==DV_INJ_IDLE);
+    assert(dv_inj_user_wants && !dv_injection_enable);
+
+    /* A new provider arrives while the close is still pending. */
+    reset(); kp.arg=&dv_injection_enable;
+    dv_injection_enable=false; dv_inj_state=DV_INJ_READY;
+    dv_inj_transport_requested=true; dv_inj_user_wants=true;
+    dv_injection_begin_close(true,true);
+    dv_injection_stream_started();          /* REG during CLOSING */
+    assert(dv_inj_stream_running);
+    assert(dv_inj_state==DV_INJ_CLOSING);   /* the close still owns it */
+    prepare_result=0; transport_ok=1;
+    dv_inj_watchdog_fn(NULL);               /* finishes the close, then resumes */
+    assert(!dv_inj_pending);
+    /* One worker pass may finish the close and prepare in the same run. */
+    assert(dv_inj_state==DV_INJ_PREPARING || dv_inj_state==DV_INJ_READY);
+    if (dv_inj_state == DV_INJ_PREPARING)
+        dv_inj_watchdog_fn(NULL);
+    assert(dv_inj_state==DV_INJ_READY);
+    assert(dv_injection_enable && dv_inj_transport_ready && dv_inj_accepting);
+
+
+    /* A seek/reset keeps the provider registered and no REG follows: the
+     * cache is dropped, the old frame is rejected, and preparation resumes on
+     * its own because the user still wants injection and the stream is alive.
+     */
+    reset(); kp.arg = &dv_injection_enable;
+    dv_injection_enable = true; dv_inj_state = DV_INJ_READY;
+    dv_inj_stream_running = true; dv_inj_user_wants = true;
+    dv_inj_transport_ready = true; dv_inj_accepting = true;
+    dv_inj_rt.ready = true; dv_injection_active = true;
+    dv_inj_pending = false; prepare_result = 0; transport_ok = 1; resolve_result = 0;
+    {
+        u32 gen_before = dv_inj_generation;
+        struct dv_inj_slot old_frame;
+        memset(&old_frame, 0, sizeof(old_frame));
+        old_frame.valid = true; old_frame.generation = gen_before;
+        old_frame.mode_gen = dv_inj_mode_generation;
+
+        dv_injection_reset_stream();
+        assert(dv_inj_generation != gen_before);   /* old frames invalidated */
+        assert(dv_inj_stream_running);             /* reset is not a stop */
+        dv_inj_watchdog_fn(NULL);                  /* close + resume, no REG */
+        if (dv_inj_state == DV_INJ_PREPARING)
+            dv_inj_watchdog_fn(NULL);
+        assert(dv_inj_state == DV_INJ_READY);
+        assert(dv_injection_enable && dv_inj_transport_ready && dv_inj_accepting);
+        /* The frame captured before the reset must no longer be accepted. */
+        assert(!dv_injection_render_slot(&old_frame));
+    }
+
+    /* A reset while the user does not want injection must not invent a
+     * running provider or turn anything on. */
+    reset();
+    dv_injection_enable = false; dv_inj_state = DV_INJ_IDLE;
+    dv_inj_stream_running = false; dv_inj_user_wants = false;
+    dv_inj_pending = false; dv_inj_transport_ready = false;
+    dv_injection_reset_stream();
+    assert(!dv_inj_stream_running);
+    assert(!dv_injection_enable && dv_inj_state == DV_INJ_IDLE);
+
+
+    /* enable -> disable -> UNREG -> worker: the physical restore must survive
+     * the later provider stop, and it must run with the request cleared.
+     */
+    reset(); kp.arg = &dv_injection_enable;
+    prepare_result = 0; transport_ok = 1; resolve_result = 0;
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE; dv_inj_pending=false;
+    dv_inj_user_wants=false; dv_inj_stream_running=true;
+    assert(!dv_injection_enable_set("1",&kp));
+    assert(dv_injection_enable && dv_inj_state==DV_INJ_READY);
+    assert(!dv_injection_enable_set("0",&kp));       /* user disable */
+    assert(dv_inj_pending && dv_inj_pending_restore);
+    dv_injection_new_stream();                        /* UNREG while closing */
+    assert(dv_inj_pending);
+    assert(dv_inj_pending_restore);                   /* obligation merged, not dropped */
+    prepare_calls = 0; force422_during_prepare = -1;
+    dv_inj_watchdog_fn(NULL);
+    assert(prepare_calls >= 1);                       /* restore really ran */
+    assert(force422_during_prepare == 0);             /* without the 422 request */
+    assert(!dv_inj_pending && dv_inj_state==DV_INJ_IDLE);
+
+    /* disable -> RESET -> worker behaves the same way. */
+    reset(); kp.arg = &dv_injection_enable;
+    prepare_result = 0; transport_ok = 1; resolve_result = 0;
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE; dv_inj_pending=false;
+    dv_inj_user_wants=false; dv_inj_stream_running=true;
+    assert(!dv_injection_enable_set("1",&kp));
+    assert(!dv_injection_enable_set("0",&kp));
+    assert(dv_inj_pending_restore);
+    dv_injection_reset_stream();                      /* RESET while closing */
+    assert(dv_inj_pending && dv_inj_pending_restore);
+    prepare_calls = 0; force422_during_prepare = -1;
+    dv_inj_watchdog_fn(NULL);
+    assert(prepare_calls >= 1);
+    assert(force422_during_prepare == 0);
+
+    /* A failing restore keeps the obligation even if a stop arrives. */
+    reset(); kp.arg = &dv_injection_enable;
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE; dv_inj_pending=false;
+    dv_inj_user_wants=true; dv_inj_stream_running=true;
+    prepare_result = 0; transport_ok = 1; resolve_result = 0;
+    assert(!dv_injection_enable_set("1",&kp));
+    assert(!dv_injection_enable_set("0",&kp));
+    prepare_result = -EIO;
+    dv_injection_new_stream();                        /* UNREG during failing close */
+    dv_inj_watchdog_fn(NULL);
+    assert(dv_inj_pending && dv_inj_pending_restore); /* still retrying */
+    prepare_result = 0;
+    dv_inj_watchdog_fn(NULL);
+    assert(!dv_inj_pending);
+
+    /* Provider state is tracked with injection off. */
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE;
+    dv_inj_stream_running=false;
+    dv_injection_stream_started();
+    assert(dv_inj_stream_running);
+    dv_injection_new_stream();
+    assert(!dv_inj_stream_running);
+
+    /* After a stop the user intent stays enabled, so a new provider
+     * re-prepares instead of leaving injection dead. */
+    /* State after a stop: the public bit is off but the user still wants it. */
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE;
+    dv_inj_user_wants=true;
+    dv_inj_pending=false; prepare_result=0; transport_ok=1;
+    dv_injection_stream_started();
+    assert(dv_inj_state==DV_INJ_PREPARING);
+    dv_inj_watchdog_fn(NULL);
+    assert(dv_inj_state==DV_INJ_READY && dv_inj_transport_ready && dv_inj_accepting);
+}
+
 int main(int argc,char **argv) {
     assert(argc==2);
     if(!strcmp(argv[1],"metadata")) test_metadata();
     else if(!strcmp(argv[1],"layout")) test_layout();
     else if(!strcmp(argv[1],"lifecycle")) test_lifecycle();
+    else if(!strcmp(argv[1],"state")) test_state_machine();
     else return 2;
     return 0;
 }
@@ -265,14 +602,20 @@ class KernelInjectionTests(unittest.TestCase):
         text = source()
         names = ("dv_injection_block_length", "dv_injection_validate_metadata",
                  "dv_injection_canvas_layout", "dv_injection_deactivate",
+                 "dv_injection_publish_candidate", "dv_injection_note_canvas_change",
+                 "dv_injection_note_canvas_committed", "dv_injection_new_stream",
+                 "dv_injection_stream_started", "dv_injection_reset_stream",
+                 "dv_injection_begin_close", "dv_injection_begin_close_locked",
+                 "dv_inj_prepare_locked", "dv_inj_watchdog_fn",
                  "dv_injection_render_slot", "dv_injection_enable_set",
                  "should_block_vsif", "dv_injection_block_hdr10",
-                 "dv_injection_render_frame")
+                 "dv_injection_render_frame",
+                 "dv_injection_force_422_12", "dv_injection_notify_output_lost")
         # Locate the definition, not the forward declaration.
         text = text.replace("static int dv_injection_enable_set(const char *val, const struct kernel_param *kp);", "")
         cfile = Path(cls.temp.name) / "contracts.c"
         capture = "static const u8 capture[] = {" + ",".join(map(str, CAPTURE)) + "};\n"
-        cfile.write_text(PREFIX + capture + "\n".join(function(text,n) for n in names) + MAIN)
+        cfile.write_text(PREFIX + capture + "\n".join(function(text,n) for n in names) + STUBS + MAIN)
         subprocess.run([compiler,"-std=c99","-O1","-fsanitize=address,undefined",
                         "-fno-omit-frame-pointer",str(cfile),"-o",str(cls.binary)],check=True)
 
@@ -288,6 +631,9 @@ class KernelInjectionTests(unittest.TestCase):
 
     def test_activation_disable_and_boot_parameter_order(self):
         subprocess.run([str(self.binary),"lifecycle"],check=True)
+
+    def test_state_machine(self):
+        subprocess.run([str(self.binary),"state"],check=True)
 
 
 if __name__ == "__main__":

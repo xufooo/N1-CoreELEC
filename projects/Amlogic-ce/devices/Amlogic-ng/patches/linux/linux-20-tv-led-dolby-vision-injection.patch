@@ -50,7 +50,7 @@ diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_
 +		 * not after it.  It revokes the injection writer and waits for a
 +		 * write already in flight, so releasing afterwards is safe.
 +		 */
-+		dv_injection_note_canvas_change();
++		(void)dv_injection_note_canvas_change();
 +#endif
  		for (i = 0; i < OSD_MAX_BUF_NUM; i++) {
  			if (fb_ion_client &&
@@ -68,20 +68,23 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  #include <linux/amlogic/cpu_version.h>
  #include <linux/cpumask.h>
  #include <linux/cpu.h>
-@@ -4625,6 +4628,12 @@
+@@ -4625,6 +4628,15 @@
  
  static bool osd_ge2d_compose_pan_display(struct osd_fence_map_s *fence_map)
  {
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	u32 dv_change_token = 0;
++#endif
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
 +	/* F3: the compose path re-points the canvas at an external buffer, so
 +	 * any cached injection target must be re-validated first.
 +	 */
-+	dv_injection_note_canvas_change();
++	dv_change_token = dv_injection_note_canvas_change();
 +#endif
  	u32 index = fence_map->fb_index;
  	bool free_scale_set = false;
  
-@@ -4691,11 +4700,23 @@
+@@ -4691,11 +4703,26 @@
  			osd_hw.free_scale_mode_backup[index];
  		free_scale_set = true;
  	}
@@ -89,7 +92,7 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
 +	/* R3: notify only once the canvas switch has really happened, and before
 +	 * the function returns.
 +	 */
-+	dv_injection_note_canvas_committed();
++	(void)dv_injection_note_canvas_committed(dv_change_token);
 +#endif
  	return free_scale_set;
  }
@@ -97,15 +100,18 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  static bool osd_direct_compose_pan_display(struct osd_fence_map_s *fence_map)
  {
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	u32 dv_change_token = 0;
++#endif
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
 +	/* F3: the compose path re-points the canvas at an external buffer, so
 +	 * any cached injection target must be re-validated first.
 +	 */
-+	dv_injection_note_canvas_change();
++	dv_change_token = dv_injection_note_canvas_change();
 +#endif
  	u32 index = fence_map->fb_index;
  	u32 ext_addr = fence_map->ext_addr;
  	u32 width_src = 0, width_dst = 0, height_src = 0, height_dst = 0;
-@@ -4897,6 +4918,12 @@
+@@ -4897,6 +4924,12 @@
  		}
  	}
  	fence_map->ext_addr = ext_addr;
@@ -113,7 +119,7 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
 +	/* R3: notify only once the canvas switch has really happened, and before
 +	 * the function returns.
 +	 */
-+	dv_injection_note_canvas_committed();
++	(void)dv_injection_note_canvas_committed(dv_change_token);
 +#endif
  	return freescale_update;
  }
@@ -156,10 +162,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..fff66666fff
+index 0000000000..ffff6aaa6fff
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2457 @@
+@@ -0,0 +1,2749 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -389,7 +395,6 @@ index 0000000000..fff66666fff
 + * already holding a snapshot cannot re-take the output afterwards.
 + */
 +static int dv_inj_render_busy;
-+static bool dv_inj_release_needed;
 +/* R6: set by the provider REG path, cleared on UNREG/RESET.  The display side
 + * refuses to re-take the output when no stream is running, and the producer
 + * only publishes into the generation it started with.
@@ -489,6 +494,47 @@ index 0000000000..fff66666fff
 + * generation the change produced.
 + */
 +static bool dv_inj_canvas_committed;
++/* Control-state machine.  PREPARING establishes a candidate target and the
++ * HDMI transport while the public enable/ready stay false; CLOSING is a
++ * transaction that survives the enable bit going false.
++ */
++enum dv_inj_state {
++	DV_INJ_IDLE = 0,
++	DV_INJ_PREPARING,
++	DV_INJ_READY,
++	DV_INJ_CLOSING,
++};
++static int dv_inj_state;
++/* New display commits are only admitted while this is true; the flag and the
++ * reader counter live under dv_inj_publish_lock. */
++static bool dv_inj_accepting;
++/* Steps a closing transaction still owes, and the generation it belongs to. */
++static bool dv_inj_pending;
++static bool dv_inj_pending_clear;
++static bool dv_inj_pending_restore;
++static u32 dv_inj_pending_gen;
++
++/* Forward declarations for transactions used across this file. */
++static void dv_injection_begin_close(bool clear_pool, bool restore);
++static void dv_injection_begin_close_locked(bool clear_pool, bool restore);
++static void dv_inj_watchdog_fn(struct work_struct *work);
++
++/* The watchdog object is defined here because begin_close schedules it, and a
++ * file scope object must be declared before use.  INIT_DELAYED_WORK runs in the
++ * module init path.
++ */
++static struct delayed_work dv_inj_watchdog;
++/* Session identity: a closing transaction is bound to the session it belongs
++ * to, so a stale pending can never tear down a newer one.
++ */
++static u32 dv_inj_session;
++/* True while a before_change has not been matched by its completion. */
++static bool dv_inj_change_in_progress;
++/* What the user asked for.  Only an explicit write to the parameter changes
++ * this: a provider stop keeps the intent so the next stream can resume, a user
++ * disable clears it.
++ */
++static bool dv_inj_user_wants;
 +static u32 dv_inj_buffer_generation;
 +
 +/* 0: per-frame metadata from the decoder (playback), 1: static buffer (debug) */
@@ -901,23 +947,37 @@ index 0000000000..fff66666fff
 +/* Process context: resolve and validate the OSD canvas once.  The display
 + * path runs in the vsync interrupt and must not take console_lock/fb locks.
 + */
-+static int dv_injection_resolve_canvas(const struct vinfo_s *vinfo)
++struct dv_inj_candidate {
++	u8 __iomem *base;
++	u64 page_bytes;
++	u32 pages;
++	u32 gen;
++};
++
++/* Build a candidate from the OSD target that is actually in effect.  Nothing is
++ * published here, so this is safe to call while injection is still disabled.
++ */
++static int dv_injection_build_candidate(const struct vinfo_s *vinfo,
++					struct dv_inj_candidate *cand)
 +{
 +	struct canvas_s cs;
 +	struct fb_info *info;
 +	u64 page_bytes;
 +	u32 pages;
 +	u32 canvas_index = READ_ONCE(osd_canvas);
-+	u32 gen_at_entry;
 +	int ret = -EINVAL;
 +
++	memset(cand, 0, sizeof(*cand));
++	if (!vinfo)
++		return -EINVAL;
 +	if (READ_ONCE(bytes_per_pixel) != 4 || canvas_index > 255)
 +		return -EINVAL;
 +
-+	/* Read the generation before touching the candidate state, so a change
-+	 * that happens during the read is detected instead of being masked.
++	/* Capture the generation before inspecting the target, so a change that
++	 * happens during the inspection is detected instead of masked.
 +	 */
-+	gen_at_entry = READ_ONCE(dv_inj_buffer_generation);
++	cand->gen = READ_ONCE(dv_inj_buffer_generation);
++
 +	console_lock();
 +	info = registered_fb[0];
 +	if (!info || !lock_fb_info(info))
@@ -937,39 +997,54 @@ index 0000000000..fff66666fff
 +		READ_ONCE(packet_repeat), &page_bytes, &pages);
 +	if (ret)
 +		goto out_fb;
-+	/* R3: publish every runtime field once, under the lock the interrupt
-+	 * uses, and only for the generation we resolved against.
-+	 */
-+	{
-+		unsigned long pflags;
-+
-+		spin_lock_irqsave(&dv_inj_publish_lock, pflags);
-+		/* The public enable bit must not gate preparation: it is false
-+		 * until the transport is ready, which would make the very first
-+		 * enable fail here.
-+		 */
-+		if (gen_at_entry == READ_ONCE(dv_inj_buffer_generation) &&
-+		    READ_ONCE(dv_inj_canvas_committed) &&
-+		    (READ_ONCE(dv_inj_transport_requested) ||
-+		     READ_ONCE(dv_injection_enable))) {
-+			WRITE_ONCE(osd_pixel_offset, (unsigned int)(page_bytes / 4));
-+			WRITE_ONCE(dv_inj_rt.base,
-+				   (u8 __iomem *)info->screen_base);
-+			WRITE_ONCE(dv_inj_rt.page_bytes, (u32)page_bytes);
-+			WRITE_ONCE(dv_inj_rt.pages, pages);
-+			WRITE_ONCE(dv_inj_rt.ready, true);
-+			ret = 0;
-+		} else {
-+			WRITE_ONCE(dv_inj_rt.ready, false);
-+			ret = -EAGAIN;
-+		}
-+		spin_unlock_irqrestore(&dv_inj_publish_lock, pflags);
-+	}
++	cand->base = (u8 __iomem *)info->screen_base;
++	cand->page_bytes = page_bytes;
++	cand->pages = pages;
++	ret = 0;
 +out_fb:
 +	unlock_fb_info(info);
 +out_console:
 +	console_unlock();
 +	return ret;
++}
++
++/* Publish a candidate and mark the display ready - only if the target has not
++ * changed since it was built and a preparation request is still outstanding.
++ */
++static int dv_injection_publish_candidate(const struct dv_inj_candidate *cand)
++{
++	unsigned long flags;
++	int ret = -EAGAIN;
++
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	/* A canvas whose before_change has not completed yet is not a valid
++	 * target: binding it would publish an address the driver is about to
++	 * replace.  Cold start has no change in progress, so it still passes.
++	 */
++	if (!READ_ONCE(dv_inj_change_in_progress) &&
++	    cand->gen == READ_ONCE(dv_inj_buffer_generation) &&
++	    (READ_ONCE(dv_inj_transport_requested) ||
++	     READ_ONCE(dv_injection_enable))) {
++		WRITE_ONCE(osd_pixel_offset, (unsigned int)(cand->page_bytes / 4));
++		WRITE_ONCE(dv_inj_rt.base, cand->base);
++		WRITE_ONCE(dv_inj_rt.page_bytes, (u32)cand->page_bytes);
++		WRITE_ONCE(dv_inj_rt.pages, cand->pages);
++		WRITE_ONCE(dv_inj_rt.ready, true);
++		ret = 0;
++	} else {
++		WRITE_ONCE(dv_inj_rt.ready, false);
++	}
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	return ret;
++}
++
++static int dv_injection_resolve_canvas(const struct vinfo_s *vinfo)
++{
++	struct dv_inj_candidate cand;
++
++	if (dv_injection_build_candidate(vinfo, &cand))
++		return -EINVAL;
++	return dv_injection_publish_candidate(&cand);
 +}
 +
 +/* Interrupt context: copy the prepared pixels of one slot, nothing else. */
@@ -1111,23 +1186,20 @@ index 0000000000..fff66666fff
 + * mapping entirely.  Called from those paths to stop the interrupt writer
 + * before the target can change or disappear; the watchdog re-resolves after.
 + */
-+void dv_injection_note_canvas_change(void)
++u32 dv_injection_note_canvas_change(void)
 +{
 +	unsigned long flags;
++	u32 token;
 +
-+	if (!READ_ONCE(dv_injection_enable))
-+		return;
-+	/* R3: taking the same lock the interrupt uses for its whole OSD copy
-+	 * drains any write already in flight before the caller releases or
-+	 * re-points the buffer.
-+	 */
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +	WRITE_ONCE(dv_inj_rt.ready, false);
-+	WRITE_ONCE(dv_inj_buffer_generation,
-+		   READ_ONCE(dv_inj_buffer_generation) + 1);
++	WRITE_ONCE(dv_inj_change_in_progress, true);
++	token = READ_ONCE(dv_inj_buffer_generation) + 1;
++	WRITE_ONCE(dv_inj_buffer_generation, token);
 +	WRITE_ONCE(dv_inj_canvas_committed, false);
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	WRITE_ONCE(dv_inj_canvas_dirty, true);
++	return token;
 +}
 +
 +/* R3: called once the driver has actually switched/committed the canvas.  The
@@ -1144,86 +1216,136 @@ index 0000000000..fff66666fff
 +void dv_injection_notify_output_lost(void)
 +{
 +	unsigned long flags;
++	bool wake = false;
 +
-+	if (!READ_ONCE(dv_injection_enable))
-+		return;
-+	/* This can be reached from output teardown paths that are not allowed to
-+	 * sleep, so it only revokes state here and lets the watchdog finish the
-+	 * handover in process context.
++	/* One revocation block: everything the IRQ/side compares against is
++	 * written here, so a late write cannot resurrect a newer preparation.
 +	 */
-+	WRITE_ONCE(dv_inj_transport_ready, false);
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	WRITE_ONCE(dv_inj_mode_generation,
++		   READ_ONCE(dv_inj_mode_generation) + 1);
 +	WRITE_ONCE(dv_inj_rt.ready, false);
++	WRITE_ONCE(dv_inj_accepting, false);
++	WRITE_ONCE(dv_inj_transport_ready, false);
++	*(bool *)&dv_injection_enable = false;
++	if (!READ_ONCE(dv_inj_pending) &&
++	    READ_ONCE(dv_inj_state) != DV_INJ_CLOSING &&
++	    READ_ONCE(dv_inj_user_wants)) {
++		if (READ_ONCE(dv_inj_state) != DV_INJ_PREPARING)
++			WRITE_ONCE(dv_inj_state, DV_INJ_PREPARING);
++		wake = true;
++	}
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
-+	WRITE_ONCE(dv_inj_release_needed, true);
-+	WRITE_ONCE(dv_inj_canvas_dirty, true);
++
++	if (wake)
++		schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(50));
 +}
 +EXPORT_SYMBOL(dv_injection_notify_output_lost);
 +
-+void dv_injection_note_canvas_committed(void)
++int dv_injection_note_canvas_committed(u32 token)
 +{
-+	if (!READ_ONCE(dv_injection_enable))
-+		return;
-+	WRITE_ONCE(dv_inj_canvas_committed, true);
-+	WRITE_ONCE(dv_inj_canvas_dirty, true);
++	unsigned long flags;
++	int ret = -EAGAIN;
++
++	/* The token check and the state it authorises are updated under one lock,
++	 * otherwise a completion for an older change could still be accepted.
++	 */
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	if (READ_ONCE(dv_inj_buffer_generation) == token &&
++	    READ_ONCE(dv_inj_change_in_progress)) {
++		WRITE_ONCE(dv_inj_canvas_committed, true);
++		WRITE_ONCE(dv_inj_change_in_progress, false);
++		ret = 0;
++	}
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	if (!ret)
++		WRITE_ONCE(dv_inj_canvas_dirty, true);
++	return ret;
 +}
 +EXPORT_SYMBOL(dv_injection_note_canvas_committed);
 +EXPORT_SYMBOL(dv_injection_note_canvas_change);
 +
 +
 +/* R6: paired with dv_injection_new_stream() on the provider REG event. */
++
++/*
++ * Cache reset (PROVIDER_RESET) and light unregister: the provider stays
++ * registered in the vframe table - vf_light_unreg_provider() only forwards the
++ * event and the deinterlace/ppmgr paths forward RESET and keep going - so the
++ * stream is still running and no REG follows.  Drop the frame identity, release
++ * the output and let the worker prepare again when the user still wants it.
++ */
++void dv_injection_reset_stream(void)
++{
++	unsigned long flags;
++
++	mutex_lock(&dv_injection_lock);
++	/* Old frames must not be matched against the new cache state. */
++	WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++	WRITE_ONCE(dv_inj_rt.ready, false);
++	WRITE_ONCE(dv_inj_accepting, false);
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++
++	if (READ_ONCE(dv_inj_state) != DV_INJ_IDLE ||
++	    READ_ONCE(dv_injection_enable)) {
++		/* Same closing transaction; it resumes when intent and the still
++		 * registered provider say so.
++		 */
++		dv_injection_begin_close_locked(true,
++					       READ_ONCE(dv_injection_enable));
++	} else if (READ_ONCE(dv_inj_user_wants) &&
++		   READ_ONCE(dv_inj_stream_running)) {
++		spin_lock_irqsave(&dv_inj_publish_lock, flags);
++		WRITE_ONCE(dv_inj_state, DV_INJ_PREPARING);
++		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	}
++	mutex_unlock(&dv_injection_lock);
++	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(20));
++}
++EXPORT_SYMBOL(dv_injection_reset_stream);
++
 +void dv_injection_stream_started(void)
 +{
 +	unsigned long flags;
 +
-+	/* R2: a new provider is a new stream - give it its own generation so
-+	 * nothing from the previous one can be reused, then allow commits.
-+	 */
 +	mutex_lock(&dv_injection_lock);
-+	/* Always record that a stream is running: a provider can start before
-+	 * injection is enabled, and enable() must not see a stale 'stopped'.
-+	 */
 +	WRITE_ONCE(dv_inj_stream_running, true);
-+	if (READ_ONCE(dv_injection_enable)) {
-+		WRITE_ONCE(dv_inj_generation,
-+			   READ_ONCE(dv_inj_generation) + 1);
++	/* A stop keeps the user's intent, so a new provider resumes on its own. */
++	if (READ_ONCE(dv_inj_state) == DV_INJ_IDLE &&
++	    READ_ONCE(dv_inj_user_wants)) {
++		spin_lock_irqsave(&dv_inj_publish_lock, flags);
++		WRITE_ONCE(dv_inj_session, READ_ONCE(dv_inj_session) + 1);
++		WRITE_ONCE(dv_inj_state, DV_INJ_PREPARING);
++		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	} else if (READ_ONCE(dv_inj_state) == DV_INJ_READY) {
++		WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
 +		spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +		memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
 +		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	}
 +	mutex_unlock(&dv_injection_lock);
++	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(50));
 +}
 +EXPORT_SYMBOL(dv_injection_stream_started);
 +
 +void dv_injection_new_stream(void)
 +{
-+	unsigned long flags;
-+	int i;
-+
-+	if (!READ_ONCE(dv_injection_enable))
-+		return;
-+	WRITE_ONCE(dv_inj_stream_running, false);
-+	/* R2: let any commit already in progress finish before the slots and the
-+	 * output state are torn down - and do not tear them down if it did not.
++	/* Provider state is tracked no matter what injection is doing - a stop
++	 * while injection is off must not leave a stale "running".
 +	 */
-+	for (i = 0; i < 50 && READ_ONCE(dv_inj_render_busy) > 0; i++)
-+		usleep_range(1000, 2000);
-+	if (READ_ONCE(dv_inj_render_busy) > 0) {
-+		/* Still in flight: forbid new commits now, finish the teardown
-+		 * from the watchdog once they drain.
-+		 */
-+		WRITE_ONCE(dv_inj_release_needed, true);
-+		dv_injection_log(1, "dv injection: stream stop deferred, render busy\n");
-+		return;
-+	}
 +	mutex_lock(&dv_injection_lock);
++	WRITE_ONCE(dv_inj_stream_running, false);
 +	WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
-+	spin_lock_irqsave(&dv_inj_publish_lock, flags);
-+	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
-+	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
-+	dv_injection_release_output();
++	if (READ_ONCE(dv_inj_state) != DV_INJ_IDLE ||
++	    READ_ONCE(dv_injection_enable)) {
++		/* R3: the same closing transaction as an explicit disable. */
++		dv_injection_begin_close_locked(true,
++					       READ_ONCE(dv_injection_enable));
++	}
 +	mutex_unlock(&dv_injection_lock);
-+	dv_injection_log(1, "dv injection: new stream generation\n");
++	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(20));
 +}
 +EXPORT_SYMBOL(dv_injection_new_stream);
 +
@@ -1277,7 +1399,9 @@ index 0000000000..fff66666fff
 +	 */
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +	dv_inj_render_busy++;
-+	ok = READ_ONCE(slot->valid) && READ_ONCE(dv_inj_rt.ready) &&
++	ok = READ_ONCE(dv_inj_accepting) &&
++	     READ_ONCE(dv_inj_state) == DV_INJ_READY &&
++	     READ_ONCE(slot->valid) && READ_ONCE(dv_inj_rt.ready) &&
 +	     READ_ONCE(dv_inj_transport_ready) &&
 +	     READ_ONCE(dv_inj_stream_running) &&
 +	     slot->generation == READ_ONCE(dv_inj_generation) &&
@@ -1300,7 +1424,9 @@ index 0000000000..fff66666fff
 +	/* R2: the stream can stop between the snapshot and the OSD write; check
 +	 * again here so nothing is written for a stream that already ended.
 +	 */
-+	if (snap->generation != READ_ONCE(dv_inj_generation) ||
++	if (!READ_ONCE(dv_inj_accepting) ||
++	    READ_ONCE(dv_inj_state) != DV_INJ_READY ||
++	    snap->generation != READ_ONCE(dv_inj_generation) ||
 +	    snap->mode_gen != READ_ONCE(dv_inj_mode_generation) ||
 +	    !READ_ONCE(dv_inj_stream_running)) {
 +		dv_injection_release_output();
@@ -1319,7 +1445,9 @@ index 0000000000..fff66666fff
 +		return false;
 +	}
 +	/* R2: the stream can stop between the snapshot and the commit. */
-+	if (snap->generation != READ_ONCE(dv_inj_generation) ||
++	if (!READ_ONCE(dv_inj_accepting) ||
++	    READ_ONCE(dv_inj_state) != DV_INJ_READY ||
++	    snap->generation != READ_ONCE(dv_inj_generation) ||
 +	    snap->mode_gen != READ_ONCE(dv_inj_mode_generation) ||
 +	    !READ_ONCE(dv_inj_stream_running)) {
 +		dv_injection_release_output();
@@ -1367,167 +1495,342 @@ index 0000000000..fff66666fff
 +EXPORT_SYMBOL(dv_injection_render_frame);
 +
 +/*
++ * One preparation transaction, used by both the parameter write and the worker.
++ * The caller holds dv_injection_lock for the whole sequence: revoke and drain,
++ * request and program the transport, then - only after the programming is done -
++ * read the canvas and the mode generation it belongs to, and publish everything
++ * together under the publish lock.
++ */
++static int dv_inj_prepare_locked(void)
++{
++	struct dv_inj_candidate cand;
++	const struct vinfo_s *vinfo;
++	unsigned long flags;
++	u32 mode_gen;
++	int i, ret = -EAGAIN, restore_ret;
++
++	if (!READ_ONCE(dv_inj_user_wants) || READ_ONCE(dv_inj_pending))
++		return -EAGAIN;
++	if (READ_ONCE(dv_inj_state) == DV_INJ_READY &&
++	    READ_ONCE(dv_injection_enable))
++		return 0;
++
++	/* 1. Revoke new commits, drain the ones in flight, and only then hand the
++	 * output back - so a later failure cannot leave force_422_12() true.
++	 */
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	WRITE_ONCE(dv_inj_state, DV_INJ_PREPARING);
++	WRITE_ONCE(dv_inj_accepting, false);
++	WRITE_ONCE(dv_inj_rt.ready, false);
++	WRITE_ONCE(dv_inj_transport_ready, false);
++	*(bool *)&dv_injection_enable = false;
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	for (i = 0; i < 50 && READ_ONCE(dv_inj_render_busy) > 0; i++)
++		usleep_range(1000, 2000);
++	if (READ_ONCE(dv_inj_render_busy) > 0)
++		return -EBUSY;
++	dv_injection_deactivate();
++
++	/* 2. Program the transport.  The driver may notify from inside this call;
++	 * that only revokes state and advances the generation, which is fine
++	 * because the target is read afterwards.
++	 */
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	WRITE_ONCE(dv_inj_transport_requested, true);
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	ret = hdmitx_prepare_output_for_injection();
++	if (ret || !hdmitx_transport_is_422_12()) {
++		ret = ret ? ret : -EAGAIN;
++		goto undo;
++	}
++
++	/* 3. Read the generation first, then the target it belongs to. */
++	mode_gen = READ_ONCE(dv_inj_mode_generation);
++	vinfo = get_current_vinfo();
++	if (dv_injection_build_candidate(vinfo, &cand)) {
++		ret = -ENODEV;
++		goto undo;
++	}
++
++	/* 4. Verify and publish everything in one critical section: a mode change
++	 * or a close that lands afterwards can no longer be overwritten.
++	 */
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	if (READ_ONCE(dv_inj_state) == DV_INJ_PREPARING &&
++	    !READ_ONCE(dv_inj_pending) &&
++	    READ_ONCE(dv_inj_user_wants) &&
++	    !READ_ONCE(dv_inj_change_in_progress) &&
++	    mode_gen == READ_ONCE(dv_inj_mode_generation) &&
++	    cand.gen == READ_ONCE(dv_inj_buffer_generation)) {
++		WRITE_ONCE(osd_pixel_offset, (unsigned int)(cand.page_bytes / 4));
++		WRITE_ONCE(dv_inj_rt.base, cand.base);
++		WRITE_ONCE(dv_inj_rt.page_bytes, (u32)cand.page_bytes);
++		WRITE_ONCE(dv_inj_rt.pages, cand.pages);
++		WRITE_ONCE(dv_inj_rt.ready, true);
++		WRITE_ONCE(dv_inj_transport_ready, true);
++		WRITE_ONCE(dv_inj_accepting, true);
++		WRITE_ONCE(dv_inj_mode_generation, mode_gen + 1);
++		WRITE_ONCE(dv_inj_state, DV_INJ_READY);
++		*(bool *)&dv_injection_enable = true;
++		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++		dv_injection_log(1, "dv injection: transport prepared\n");
++		return 0;
++	}
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	ret = -EAGAIN;
++
++undo:
++	/* Mark the transaction as closing *before* restoring: the restore runs
++	 * through the driver and may notify, and a notification must not turn this
++	 * rollback into a fresh preparation.
++	 */
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	WRITE_ONCE(dv_inj_rt.ready, false);
++	WRITE_ONCE(dv_inj_accepting, false);
++	WRITE_ONCE(dv_inj_transport_ready, false);
++	WRITE_ONCE(dv_inj_transport_requested, false);
++	*(bool *)&dv_injection_enable = false;
++	WRITE_ONCE(dv_inj_state, DV_INJ_CLOSING);
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++
++	restore_ret = hdmitx_prepare_output_for_injection();
++
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	if (restore_ret) {
++		/* Keep a closing transaction so the worker retries the restore. */
++		WRITE_ONCE(dv_inj_pending, true);
++		WRITE_ONCE(dv_inj_pending_clear, false);
++		WRITE_ONCE(dv_inj_pending_restore, true);
++		WRITE_ONCE(dv_inj_pending_gen, READ_ONCE(dv_inj_session));
++		WRITE_ONCE(dv_inj_state, DV_INJ_CLOSING);
++	} else {
++		WRITE_ONCE(dv_inj_pending, false);
++		WRITE_ONCE(dv_inj_state, DV_INJ_IDLE);
++	}
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++
++	if (restore_ret) {
++		dv_injection_log(0,
++				 "dv injection: undo restore failed (%d), deferring\n",
++				 restore_ret);
++		schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(200));
++	}
++	return ret;
++}
++
++/* Begin the closing transaction.  It is deliberately independent of the public
++ * enable bit: enabling is already false by the time this runs, yet the release,
++ * the slot clear and the physical restore still have to happen.
++ */
++/* Requires dv_injection_lock; the wrapper below takes it for external callers. */
++/* Requires dv_injection_lock; every shared field is written under the publish
++ * lock so the IRQ-side notify sees the transition atomically.
++ */
++/* Requires dv_injection_lock; every shared field is written under the publish
++ * lock so the IRQ-side notify sees the transition atomically.
++ */
++static void dv_injection_begin_close_locked(bool clear_pool, bool restore)
++{
++	unsigned long flags;
++	u32 gen;
++
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	/* A repeated close in the same session must merge its outstanding work.  A
++	 * later stop (public enable already false) passes restore == false, and
++	 * overwriting would drop a physical restore an earlier disable still owes.
++	 */
++	if (READ_ONCE(dv_inj_pending) &&
++	    READ_ONCE(dv_inj_pending_gen) == READ_ONCE(dv_inj_session)) {
++		clear_pool = clear_pool || READ_ONCE(dv_inj_pending_clear);
++		restore = restore || READ_ONCE(dv_inj_pending_restore);
++		gen = READ_ONCE(dv_inj_pending_gen);
++	} else {
++		/* New transaction: bind it to this session. */
++		gen = READ_ONCE(dv_inj_session);
++	}
++	*(bool *)&dv_injection_enable = false;
++	WRITE_ONCE(dv_inj_transport_requested, false);
++	WRITE_ONCE(dv_inj_transport_ready, false);
++	WRITE_ONCE(dv_inj_accepting, false);
++	WRITE_ONCE(dv_inj_rt.ready, false);
++	WRITE_ONCE(dv_inj_state, DV_INJ_CLOSING);
++	WRITE_ONCE(dv_inj_pending, true);
++	WRITE_ONCE(dv_inj_pending_clear, clear_pool);
++	WRITE_ONCE(dv_inj_pending_restore, restore);
++	WRITE_ONCE(dv_inj_pending_gen, gen);
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++}
++
++static void dv_injection_begin_close(bool clear_pool, bool restore)
++{
++	mutex_lock(&dv_injection_lock);
++	dv_injection_begin_close_locked(clear_pool, restore);
++	mutex_unlock(&dv_injection_lock);
++	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(20));
++}
++
++/*
 + * F6: the display hook only runs when there is a frame on screen.  If
 + * playback stops while injection is on, nothing calls release_output() and
 + * the normal HDR producer stays blocked.  A small watchdog covers the
 + * "stopped, no new frame" case that the frame path cannot see.
 + */
-+static struct delayed_work dv_inj_watchdog;
-+
 +static void dv_inj_watchdog_fn(struct work_struct *work)
 +{
-+	if (!READ_ONCE(dv_injection_enable))
-+		return;
-+	/* R1: a teardown revokes transport readiness; retry the preparation here
-+	 * because this runs in process context, unlike the teardown itself.
-+	 */
-+	if (READ_ONCE(dv_injection_enable) &&
-+	    READ_ONCE(dv_inj_transport_requested) &&
-+	    !READ_ONCE(dv_inj_transport_ready)) {
-+		if (!hdmitx_prepare_output_for_injection() &&
-+		    hdmitx_transport_is_422_12()) {
-+			WRITE_ONCE(dv_inj_mode_generation,
-+				   READ_ONCE(dv_inj_mode_generation) + 1);
-+			WRITE_ONCE(dv_inj_transport_ready, true);
-+			dv_injection_log(1, "dv injection: transport re-prepared\n");
-+		}
-+	}
-+	if (READ_ONCE(dv_inj_release_needed)) {
-+		if (READ_ONCE(dv_inj_render_busy) > 0) {
-+			/* still draining - look again next tick */
-+			schedule_delayed_work(&dv_inj_watchdog,
-+					      msecs_to_jiffies(1000));
-+			return;
-+		}
-+		WRITE_ONCE(dv_inj_release_needed, false);
-+		mutex_lock(&dv_injection_lock);
-+		dv_injection_release_output();
-+		mutex_unlock(&dv_injection_lock);
-+	}
-+	if (READ_ONCE(dv_injection_active) && !get_video_enabled()) {
-+		mutex_lock(&dv_injection_lock);
-+		dv_injection_release_output();
-+		mutex_unlock(&dv_injection_lock);
-+	}
-+	/* Re-resolve after OSD activity: the canvas address or the fb mapping may
-+	 * have moved.  A failure keeps the previous state and is counted. */
-+	if (READ_ONCE(dv_inj_canvas_dirty) &&
-+	    READ_ONCE(dv_inj_canvas_committed)) {
-+		const struct vinfo_s *vinfo = get_current_vinfo();
++	unsigned long flags;
++	const struct vinfo_s *vinfo;
++	int ret = 0;
 +
++	/* The whole transaction is decided under the control lock so an old
++	 * preparation cannot overwrite a newer close, and a close cannot run
++	 * against a session it does not own.
++	 */
++	mutex_lock(&dv_injection_lock);
++
++	if (READ_ONCE(dv_inj_pending)) {
++		if (READ_ONCE(dv_inj_pending_gen) != READ_ONCE(dv_inj_session)) {
++			WRITE_ONCE(dv_inj_pending, false);
++			dv_injection_log(1, "dv injection: stale pending dropped\n");
++		} else if (READ_ONCE(dv_inj_render_busy) > 0) {
++			mutex_unlock(&dv_injection_lock);
++			schedule_delayed_work(&dv_inj_watchdog,
++					      msecs_to_jiffies(20));
++			return;
++		} else {
++			/* R3: final DV-off after the last in-flight send. */
++			dv_injection_deactivate();
++			spin_lock_irqsave(&dv_inj_publish_lock, flags);
++			WRITE_ONCE(dv_inj_rt.ready, false);
++			if (READ_ONCE(dv_inj_pending_clear))
++				memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++			spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++			if (READ_ONCE(dv_inj_pending_restore))
++				ret = hdmitx_prepare_output_for_injection();
++			if (ret) {
++				dv_injection_log(0,
++						 "dv injection: closing restore failed (%d), retrying\n",
++						 ret);
++				mutex_unlock(&dv_injection_lock);
++				schedule_delayed_work(&dv_inj_watchdog,
++						      msecs_to_jiffies(200));
++				return;
++			}
++			/* Decide the outcome in the same critical section the IRQ
++			 * side uses, so a notification cannot interleave here.
++			 */
++			spin_lock_irqsave(&dv_inj_publish_lock, flags);
++			WRITE_ONCE(dv_inj_pending, false);
++			if (READ_ONCE(dv_inj_user_wants) &&
++			    READ_ONCE(dv_inj_stream_running)) {
++				WRITE_ONCE(dv_inj_session,
++					   READ_ONCE(dv_inj_session) + 1);
++				WRITE_ONCE(dv_inj_state, DV_INJ_PREPARING);
++			} else {
++				WRITE_ONCE(dv_inj_state, DV_INJ_IDLE);
++			}
++			spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++			dv_injection_log(1, "dv injection: closing transaction finished\n");
++		}
++	}
++
++	/* A preparation is outstanding (cold start, resume after a stop, or after
++	 * an output loss): run it through the same helper the parameter uses.
++	 */
++	if (READ_ONCE(dv_inj_state) == DV_INJ_PREPARING &&
++	    !READ_ONCE(dv_inj_pending)) {
++		if (!READ_ONCE(dv_inj_user_wants)) {
++			spin_lock_irqsave(&dv_inj_publish_lock, flags);
++			WRITE_ONCE(dv_inj_transport_requested, false);
++			WRITE_ONCE(dv_inj_state, DV_INJ_IDLE);
++			spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++		} else {
++			ret = dv_inj_prepare_locked();
++			if (ret && ret != -EBUSY)
++				dv_injection_log(1,
++						 "dv injection: prepare deferred (%d)\n",
++						 ret);
++		}
++	}
++
++	/* Re-bind after a committed OSD change while injection is live. */
++	if (READ_ONCE(dv_inj_canvas_dirty) &&
++	    READ_ONCE(dv_inj_canvas_committed) &&
++	    !READ_ONCE(dv_inj_change_in_progress) &&
++	    READ_ONCE(dv_inj_state) == DV_INJ_READY) {
++		vinfo = get_current_vinfo();
 +		WRITE_ONCE(dv_inj_canvas_dirty, false);
 +		if (vinfo && dv_injection_resolve_canvas(vinfo)) {
-+			/* R3: no usable target means no injection - hand the output
-+			 * back rather than keeping a stale ready state.
-+			 */
 +			dv_injection_log(1, "dv injection: canvas re-resolve failed\n");
-+			WRITE_ONCE(dv_inj_release_needed, true);
++			WRITE_ONCE(dv_inj_rt.ready, false);
 +		}
 +	}
++
++	mutex_unlock(&dv_injection_lock);
 +	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(1000));
 +}
 +
 +static int dv_injection_enable_set(const char *val, const struct kernel_param *kp)
 +{
 +	struct kernel_param temporary = *kp;
-+	bool enabled;
 +	unsigned long flags;
++	bool enabled;
 +	int ret;
-+	int i;
 +
 +	temporary.arg = &enabled;
 +	ret = param_set_bool(val, &temporary);
-+	if (ret || (enabled && !dv_inj_ready))
-+		return ret ? ret : -EAGAIN;
-+	if (enabled) {
-+		/* Process context: resolve the canvas once, then start a new
-+		 * generation so stale slots from a previous clip cannot be
-+		 * reused by the display path. */
-+		const struct vinfo_s *vinfo = get_current_vinfo();
++	if (ret)
++		return ret;
 +
-+		mutex_lock(&dv_injection_lock);
-+		spin_lock_irqsave(&dv_inj_publish_lock, flags);
-+		memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
-+		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
-+		WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
-+		if (!vinfo || dv_injection_resolve_canvas(vinfo)) {
-+			mutex_unlock(&dv_injection_lock);
-+			return -ENODEV;
-+		}
-+		/* R1: do not expose the module as enabled before the transport is
-+		 * actually prepared - injection must not be displayable yet.
++	if (!enabled) {
++		/* Intent and the closing transaction are updated in one critical
++		 * section: an enable cannot slip in between them.
 +		 */
++		mutex_lock(&dv_injection_lock);
 +		*(bool *)kp->arg = false;
-+		WRITE_ONCE(dv_inj_transport_requested, true);
++		WRITE_ONCE(dv_inj_user_wants, false);
++		dv_injection_begin_close_locked(true, true);
 +		mutex_unlock(&dv_injection_lock);
-+		/* R4/R1: reprogram the physical transport from process context
-+		 * before the first frame, and only claim readiness if the driver
-+		 * actually accepted the new mode.
-+		 */
-+		ret = hdmitx_prepare_output_for_injection();
-+		if (ret) {
-+			dv_injection_log(0,
-+					 "dv injection: output preparation failed (%d)\n",
-+					 ret);
-+			mutex_lock(&dv_injection_lock);
-+			WRITE_ONCE(dv_inj_transport_requested, false);
-+			*(bool *)kp->arg = false;
-+			mutex_unlock(&dv_injection_lock);
-+			return ret;
-+		}
-+		/* R1: do not trust the request - confirm the driver really ended
-+		 * up on 422/12-bit before publishing transport readiness.
-+		 */
-+		if (!hdmitx_transport_is_422_12()) {
-+			dv_injection_log(0,
-+					 "dv injection: transport is not 422/12-bit\n");
-+			mutex_lock(&dv_injection_lock);
-+			WRITE_ONCE(dv_inj_transport_requested, false);
-+			*(bool *)kp->arg = false;
-+			mutex_unlock(&dv_injection_lock);
-+			return -EAGAIN;
-+		}
-+		WRITE_ONCE(dv_inj_mode_generation,
-+			   READ_ONCE(dv_inj_mode_generation) + 1);
-+		WRITE_ONCE(dv_inj_transport_ready, true);
-+		/* R1: only now is the module allowed to appear enabled. */
-+		mutex_lock(&dv_injection_lock);
-+		*(bool *)kp->arg = true;
-+		mutex_unlock(&dv_injection_lock);
-+		schedule_delayed_work(&dv_inj_watchdog,
-+				      msecs_to_jiffies(1000));
++		schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(20));
 +		return 0;
 +	}
 +
++	if (!dv_inj_ready)
++		return -EAGAIN;
++
++	/* The control lock is held across the whole transaction, so a stale
++	 * preparation can never overwrite a disable or a newer close.
++	 */
 +	mutex_lock(&dv_injection_lock);
-+	*(bool *)kp->arg = false;
-+	dv_injection_deactivate();
-+	WRITE_ONCE(dv_inj_rt.ready, false);
++	WRITE_ONCE(dv_inj_user_wants, true);
++	if (READ_ONCE(dv_inj_state) == DV_INJ_CLOSING ||
++	    READ_ONCE(dv_inj_pending)) {
++		mutex_unlock(&dv_injection_lock);
++		schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(50));
++		return -EAGAIN;
++	}
++	/* Already prepared: a repeated enable must not disturb the running path. */
++	if (READ_ONCE(dv_inj_state) == DV_INJ_READY &&
++	    READ_ONCE(dv_injection_enable)) {
++		mutex_unlock(&dv_injection_lock);
++		return 0;
++	}
++	WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
++	WRITE_ONCE(dv_inj_session, READ_ONCE(dv_inj_session) + 1);
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
-+	mutex_unlock(&dv_injection_lock);
-+	WRITE_ONCE(dv_inj_transport_ready, false);
-+	WRITE_ONCE(dv_inj_transport_requested, false);
-+	/* R2: wait for commits already inside before restoring the output.  If
-+	 * they do not drain, defer the restore instead of racing it.
-+	 */
-+	for (i = 0; i < 50 && READ_ONCE(dv_inj_render_busy) > 0; i++)
-+		usleep_range(1000, 2000);
-+	if (READ_ONCE(dv_inj_render_busy) > 0) {
-+		WRITE_ONCE(dv_inj_release_needed, true);
-+		schedule_delayed_work(&dv_inj_watchdog,
-+				      msecs_to_jiffies(1000));
-+		dv_injection_log(0, "dv injection: disable deferred, render busy\n");
-+		return -EBUSY;
++	ret = dv_inj_prepare_locked();
++	if (ret) {
++		/* Roll back inside the same transaction: re-acquiring later could
++		 * clobber a legitimate enable that happened in between.
++		 */
++		dv_injection_log(0, "dv injection: preparation failed (%d)\n", ret);
++		*(bool *)kp->arg = false;
++		mutex_unlock(&dv_injection_lock);
++		return ret;
 +	}
-+	/* R1: the reference always checks the restore too - a silent failure here
-+	 * would leave the display on 422/12-bit after injection is off. */
-+	ret = hdmitx_prepare_output_for_injection();
-+	if (ret)
-+		dv_injection_log(0, "dv injection: output restore failed (%d)\n",
-+				 ret);
-+	cancel_delayed_work_sync(&dv_inj_watchdog);
++	mutex_unlock(&dv_injection_lock);
++	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(1000));
 +	return 0;
 +}
 +
@@ -2493,18 +2796,13 @@ index 0000000000..fff66666fff
 + */
 +bool dv_injection_force_422_12(void)
 +{
-+	/* Requested, not "already sent": the transport has to be prepared before
-+	 * the first frame, otherwise the very first VSIF goes out over an 8-bit
-+	 * pipe and the DM bits are gone.
-+	 */
-+	/* Deliberately independent of the public enable bit: preparation happens
-+	 * while enable is still false, and that is exactly when the driver needs
-+	 * to be told to use 422/12-bit.
++	/* Keys off the physical request and the active state, never the public
++	 * enable bit: preparation runs while enable is still false, and a closing
++	 * transaction clears the request so the restore does not force 422/12.
 +	 */
 +	return READ_ONCE(dv_inj_transport_requested) ||
 +	       READ_ONCE(dv_injection_active);
-+}
-+EXPORT_SYMBOL(dv_injection_force_422_12);
++}EXPORT_SYMBOL(dv_injection_force_422_12);
 +
 +bool dv_injection_block_hdr10(void)
 +{
@@ -2658,19 +2956,25 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  		video_vf_unreg_provider();
  		drop_frame_count = 0;
  		receive_frame_count = 0;
-@@ -7214,13 +7231,22 @@
+@@ -7214,13 +7231,28 @@
  #endif
  		update_process_hdmi_avsync_flag(false);
  	} else if (type == VFRAME_EVENT_PROVIDER_RESET) {
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+		dv_injection_new_stream();	/* seek/reset: no stale slots */
++		/* The provider stays registered and no REG follows a seek/reset, so
++		 * this is a cache reset, not a permanent stop.
++		 */
++		dv_injection_reset_stream();
 +#endif
  		video_vf_light_unreg_provider(1);
  		omx_cur_session = 0xffffffff;
  		nn_scenes_value[0].maxprob = 0;
  	} else if (type == VFRAME_EVENT_PROVIDER_LIGHT_UNREG) {
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+		dv_injection_new_stream();
++		/* vf_light_unreg_provider() only forwards this event and keeps the
++		 * provider entry, so treat it like a cache reset as well.
++		 */
++		dv_injection_reset_stream();
 +#endif
  		video_vf_light_unreg_provider(0);
  		nn_scenes_value[0].maxprob = 0;
@@ -2681,7 +2985,7 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  		max_dis_hwc = 0;
  		min_dis_hwc = 0;
  		video_drop_vf_cnt = 0;
-@@ -7787,6 +7813,13 @@
+@@ -7787,6 +7819,13 @@
  	if (vf->src_fmt.fmt != VFRAME_SIGNAL_FMT_DOVI)
  		clear_vframe_dovi_md_info(vf);
  
@@ -2955,10 +3259,10 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  struct hdr10plus_para hsty_hdr10p_config_data[8];
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..bbb22222bbb
+index 0000000000..dddd4eee4ddd
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,33 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -2981,8 +3285,10 @@ index 0000000000..bbb22222bbb
 +bool dv_injection_force_422_12(void);
 +void dv_injection_new_stream(void);
 +void dv_injection_stream_started(void);
-+void dv_injection_note_canvas_change(void);
-+void dv_injection_note_canvas_committed(void);
++/* cache reset / light unregister: provider is still registered */
++void dv_injection_reset_stream(void);
++u32 dv_injection_note_canvas_change(void);
++int dv_injection_note_canvas_committed(u32 token);
 +void dv_injection_notify_output_lost(void);
 +void dv_injection_note_osd_activity(void);
 +
