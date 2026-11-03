@@ -151,10 +151,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..ccc33333ccc
+index 0000000000..ddd44444ddd
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2363 @@
+@@ -0,0 +1,2395 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -432,6 +432,7 @@ index 0000000000..ccc33333ccc
 +	bool valid;
 +	u8 num_pkts;
 +	u32 generation;
++	u32 mode_gen;
 +	u32 pixel_data[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_PIXELS_PER_PKT];
 +};
 +
@@ -1159,7 +1160,20 @@ index 0000000000..ccc33333ccc
 +/* R6: paired with dv_injection_new_stream() on the provider REG event. */
 +void dv_injection_stream_started(void)
 +{
++	unsigned long flags;
++
++	/* R2: a new provider is a new stream - give it its own generation so
++	 * nothing from the previous one can be reused, then allow commits.
++	 */
++	if (!READ_ONCE(dv_injection_enable))
++		return;
++	mutex_lock(&dv_injection_lock);
++	WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
++	spin_lock_irqsave(&dv_inj_publish_lock, flags);
++	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	WRITE_ONCE(dv_inj_stream_running, true);
++	mutex_unlock(&dv_injection_lock);
 +}
 +EXPORT_SYMBOL(dv_injection_stream_started);
 +
@@ -1240,12 +1254,14 @@ index 0000000000..ccc33333ccc
 +	ok = READ_ONCE(slot->valid) && READ_ONCE(dv_inj_rt.ready) &&
 +	     READ_ONCE(dv_inj_transport_ready) &&
 +	     READ_ONCE(dv_inj_stream_running) &&
-+	     slot->generation == READ_ONCE(dv_inj_generation);
++	     slot->generation == READ_ONCE(dv_inj_generation) &&
++	     slot->mode_gen == READ_ONCE(dv_inj_mode_generation);
 +	if (ok) {
 +		memcpy(snap->pixel_data, slot->pixel_data,
 +		       sizeof(snap->pixel_data));
 +		snap->num_pkts = slot->num_pkts;
 +		snap->generation = slot->generation;
++		snap->mode_gen = slot->mode_gen;
 +	}
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	if (!ok) {
@@ -1268,6 +1284,7 @@ index 0000000000..ccc33333ccc
 +	}
 +	/* R2: the stream can stop between the snapshot and the commit. */
 +	if (snap->generation != READ_ONCE(dv_inj_generation) ||
++	    snap->mode_gen != READ_ONCE(dv_inj_mode_generation) ||
 +	    !READ_ONCE(dv_inj_stream_running)) {
 +		dv_injection_release_output();
 +		dv_inj_render_exit();
@@ -1325,6 +1342,20 @@ index 0000000000..ccc33333ccc
 +{
 +	if (!READ_ONCE(dv_injection_enable))
 +		return;
++	/* R1: a teardown revokes transport readiness; retry the preparation here
++	 * because this runs in process context, unlike the teardown itself.
++	 */
++	if (READ_ONCE(dv_injection_enable) &&
++	    READ_ONCE(dv_inj_transport_requested) &&
++	    !READ_ONCE(dv_inj_transport_ready)) {
++		if (!hdmitx_prepare_output_for_injection() &&
++		    hdmitx_transport_is_422_12()) {
++			WRITE_ONCE(dv_inj_mode_generation,
++				   READ_ONCE(dv_inj_mode_generation) + 1);
++			WRITE_ONCE(dv_inj_transport_ready, true);
++			dv_injection_log(1, "dv injection: transport re-prepared\n");
++		}
++	}
 +	if (READ_ONCE(dv_inj_release_needed)) {
 +		WRITE_ONCE(dv_inj_release_needed, false);
 +		mutex_lock(&dv_injection_lock);
@@ -2345,6 +2376,7 @@ index 0000000000..ccc33333ccc
 +			       sizeof(slot->pixel_data));
 +			slot->num_pkts = dm_packet.num_pkts;
 +			slot->generation = gen;
++			slot->mode_gen = READ_ONCE(dv_inj_mode_generation);
 +			WRITE_ONCE(slot->valid, true);
 +		}
 +		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);

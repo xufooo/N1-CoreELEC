@@ -66,7 +66,7 @@ static bool dv_injection_enable, dv_injection_active, dv_inj_ready;
 static unsigned dm_metadata_size, dv_injection_path;
 static bool always_send_vsif = true;
 static int dv_injection_lock;
-struct dv_inj_slot { bool valid; u8 num_pkts; u32 generation;
+struct dv_inj_slot { bool valid; u8 num_pkts; u32 generation; u32 mode_gen;
                      u32 pixel_data[5][1024]; };
 static struct dv_inj_slot dv_inj_pool[64];
 static struct dv_inj_slot dv_inj_display_snapshot;
@@ -178,6 +178,7 @@ static void test_layout(void) {
 static void reset(void) {
     dv_injection_enable=true; dv_injection_active=false;
     dv_inj_stream_running=true; dv_inj_transport_requested=true;
+    dv_inj_transport_ready=true; dv_inj_mode_generation=0;
     dm_metadata_size=181; dv_injection_path=0;
     always_send_vsif=true; sink.ieeeoui=0x00d046;
     video_on=1; canvas_result=0; send_result=0;
