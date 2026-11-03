@@ -151,10 +151,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..ddd44444ddd
+index 0000000000..eee55555eee
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2395 @@
+@@ -0,0 +1,2417 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -1271,6 +1271,16 @@ index 0000000000..ddd44444ddd
 +		return false;
 +	}
 +
++	/* R2: the stream can stop between the snapshot and the OSD write; check
++	 * again here so nothing is written for a stream that already ended.
++	 */
++	if (snap->generation != READ_ONCE(dv_inj_generation) ||
++	    snap->mode_gen != READ_ONCE(dv_inj_mode_generation) ||
++	    !READ_ONCE(dv_inj_stream_running)) {
++		dv_injection_release_output();
++		dv_inj_render_exit();
++		return false;
++	}
 +	/* R3: the OSD copy runs under the publish lock so a canvas change or a
 +	 * buffer release can drain it by taking the same lock.
 +	 */
@@ -1391,6 +1401,7 @@ index 0000000000..ddd44444ddd
 +	bool enabled;
 +	unsigned long flags;
 +	int ret;
++	int i;
 +
 +	temporary.arg = &enabled;
 +	ret = param_set_bool(val, &temporary);
@@ -1411,7 +1422,10 @@ index 0000000000..ddd44444ddd
 +			mutex_unlock(&dv_injection_lock);
 +			return -ENODEV;
 +		}
-+		*(bool *)kp->arg = true;
++		/* R1: do not expose the module as enabled before the transport is
++		 * actually prepared - injection must not be displayable yet.
++		 */
++		*(bool *)kp->arg = false;
 +		WRITE_ONCE(dv_inj_transport_requested, true);
 +		mutex_unlock(&dv_injection_lock);
 +		/* R4/R1: reprogram the physical transport from process context
@@ -1444,6 +1458,10 @@ index 0000000000..ddd44444ddd
 +		WRITE_ONCE(dv_inj_mode_generation,
 +			   READ_ONCE(dv_inj_mode_generation) + 1);
 +		WRITE_ONCE(dv_inj_transport_ready, true);
++		/* R1: only now is the module allowed to appear enabled. */
++		mutex_lock(&dv_injection_lock);
++		*(bool *)kp->arg = true;
++		mutex_unlock(&dv_injection_lock);
 +		schedule_delayed_work(&dv_inj_watchdog,
 +				      msecs_to_jiffies(1000));
 +		return 0;
@@ -1459,6 +1477,9 @@ index 0000000000..ddd44444ddd
 +	mutex_unlock(&dv_injection_lock);
 +	WRITE_ONCE(dv_inj_transport_ready, false);
 +	WRITE_ONCE(dv_inj_transport_requested, false);
++	/* R2: wait for commits already inside before restoring the output. */
++	for (i = 0; i < 50 && READ_ONCE(dv_inj_render_busy) > 0; i++)
++		usleep_range(1000, 2000);
 +	/* R1: the reference always checks the restore too - a silent failure here
 +	 * would leave the display on 422/12-bit after injection is off. */
 +	ret = hdmitx_prepare_output_for_injection();
@@ -2371,7 +2392,8 @@ index 0000000000..ddd44444ddd
 +		 * stream generation and the stream is still running.
 +		 */
 +		if (gen == READ_ONCE(dv_inj_generation) &&
-+		    READ_ONCE(dv_inj_stream_running)) {
++		    READ_ONCE(dv_inj_stream_running) &&
++		    READ_ONCE(dv_injection_enable)) {
 +			memcpy(slot->pixel_data, dm_packet.pixel_data,
 +			       sizeof(slot->pixel_data));
 +			slot->num_pkts = dm_packet.num_pkts;

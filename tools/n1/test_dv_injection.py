@@ -91,6 +91,7 @@ static bool dv_inj_transport_requested;
 static int dv_inj_render_busy;
 static bool dv_inj_release_needed;
 static void dv_inj_render_exit(void) { if (dv_inj_render_busy > 0) dv_inj_render_busy--; }
+static void usleep_range(unsigned long a, unsigned long b) { (void)a; (void)b; }
 static bool dv_inj_transport_ready;
 static u32 dv_inj_mode_generation;
 static void dv_injection_log(int level, const char *fmt, ...) { (void)level; (void)fmt; }
