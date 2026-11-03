@@ -47,5 +47,32 @@ make_host() {
 
 makeinstall_host() {
   cargo_prepare_lock
-  cargo install --profile release --path ${PKG_BUILD}
+
+  # `cargo install --path` resolves the dependency graph again from scratch
+  # and ignores the Cargo.lock we pinned above, so it picked ignore 0.4.30
+  # again and the install step died with the same let-chains error.  Install
+  # the binary that was already built with the pinned lock instead, the same
+  # way packages/rust/cargo and packages/rust/bindgen-cli do it.  ${TOOLCHAIN}/bin
+  # is the first entry of PATH (config/path), so `cargo cbuild` finds cargo-c.
+  cargo build --release --manifest-path ${PKG_BUILD}/Cargo.toml
+
+  cargo_c_bin=""
+  for cargo_c_dir in "${CARGO_TARGET_DIR:-}" "${PKG_BUILD}/.${RUST_HOST}/target" "${PKG_BUILD}/target"; do
+    [ -n "${cargo_c_dir}" ] || continue
+    if [ -x "${cargo_c_dir}/release/cargo-c" ]; then
+      cargo_c_bin="${cargo_c_dir}/release/cargo-c"
+      break
+    fi
+  done
+  if [ -z "${cargo_c_bin}" ]; then
+    echo "ERROR: cargo-c binary not found after the host build" >&2
+    return 1
+  fi
+
+  mkdir -p ${TOOLCHAIN}/bin
+  cp -a "${cargo_c_bin}" ${TOOLCHAIN}/bin/
+  if [ -n "${CARGO_HOME}" ]; then
+    mkdir -p "${CARGO_HOME}/bin"
+    cp -a "${cargo_c_bin}" "${CARGO_HOME}/bin/"
+  fi
 }
