@@ -2430,24 +2430,11 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  #include <linux/amlogic/media/vout/vout_notify.h>
  #ifdef CONFIG_AMLOGIC_SND_SOC
  #include <linux/amlogic/media/sound/aout_notify.h>
-@@ -75,8 +78,25 @@
+@@ -75,8 +78,12 @@
  
  static struct class *hdmitx_class;
  static int set_disp_mode_auto(void);
 +
-+/*
-+ * R4: the injection path needs the physical transport reprogrammed when it
-+ * starts or stops, not only when somebody else changes the mode.  This
-+ * re-runs the normal mode selection so the colourspace/colourdepth branch
-+ * sees the new injection state; callers must be in process context.
-+ */
-+int hdmitx_prepare_output_for_injection(void)
-+{
-+	if (!hdmitx_device.ready)
-+		return -EAGAIN;
-+	return set_disp_mode_auto();
-+}
-+EXPORT_SYMBOL(hdmitx_prepare_output_for_injection);
 +
  static void hdmitx_get_edid(struct hdmitx_dev *hdev);
  static void hdmitx_set_drm_pkt(struct master_display_info_s *data);
@@ -2456,7 +2443,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type
  	tunnel_mode, struct dv_vsif_para *data, bool switch_to_sdr);
  static void hdmitx_set_hdr10plus_pkt(unsigned int flag,
-@@ -102,6 +122,26 @@
+@@ -102,6 +109,40 @@
  	.frac_rate_policy = 1,
  	.cec_func_config = 0x7f
  };
@@ -2480,10 +2467,24 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
 +}
 +EXPORT_SYMBOL(hdmitx_vsif_tx_ready);
 +
++/*
++ * R4: the injection path needs the physical transport reprogrammed when it
++ * starts or stops, not only when somebody else changes the mode.  This
++ * re-runs the normal mode selection so the colourspace/colourdepth branch
++ * sees the new injection state; callers must be in process context.
++ */
++int hdmitx_prepare_output_for_injection(void)
++{
++	if (!hdmitx_device.ready)
++		return -EAGAIN;
++	return set_disp_mode_auto();
++}
++EXPORT_SYMBOL(hdmitx_prepare_output_for_injection);
++
  
  static const struct dv_info dv_dummy;
  static int log_level;
-@@ -686,6 +726,17 @@
+@@ -686,6 +727,17 @@
  				int cs = para->cs;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
@@ -2501,7 +2502,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  					case RGB_10_12BIT:
  						para->cs = COLORSPACE_YUV444;
  						break;
-@@ -718,6 +769,13 @@
+@@ -718,6 +770,13 @@
  				int cd = para->cd;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
@@ -2515,7 +2516,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  							para->cd = COLORDEPTH_24B;
  						break;
  					case RGB_10_12BIT:
-@@ -1860,7 +1918,7 @@
+@@ -1860,7 +1919,7 @@
  struct vsif_debug_save vsif_debug_info;
  struct vsif_debug_save hsty_vsif_config_data[8];
  unsigned int hsty_vsif_config_loc, hsty_vsif_config_num;
@@ -2524,7 +2525,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  	enum mode_type tunnel_mode, struct dv_vsif_para *data, bool signal_sdr)
  {
  	struct hdmitx_dev *hdev = &hdmitx_device;
-@@ -1874,12 +1932,9 @@
+@@ -1874,12 +1933,9 @@
  	static enum eotf_type ltype = EOTF_T_NULL;
  	static uint8_t ltmode = -1;
  	enum hdmi_tf_type hdr_type = HDMI_NONE;
@@ -2537,7 +2538,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  	if (data == NULL)
-@@ -1904,7 +1959,6 @@
+@@ -1904,7 +1960,6 @@
  	if (hdev->ready == 0) {
  		ltype = EOTF_T_NULL;
  		ltmode = -1;
@@ -2545,7 +2546,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  	if (hdev->rxcap.dv_info.ieeeoui != DV_IEEE_OUI) {
-@@ -1913,7 +1967,6 @@
+@@ -1913,7 +1968,6 @@
  	}
  	if ((hdev->chip_type) < MESON_CPU_ID_GXL) {
  		pr_info("hdmitx: not support DolbyVision\n");
@@ -2553,7 +2554,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  
-@@ -1984,7 +2037,6 @@
+@@ -1984,7 +2038,6 @@
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB1, VEN_HB);
@@ -2561,7 +2562,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  			return;
  		}
  		if (type == EOTF_T_DOLBYVISION) {
-@@ -2102,7 +2154,6 @@
+@@ -2102,7 +2155,6 @@
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB2, VEN_HB);
@@ -2569,13 +2570,13 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  			return;
  		}
  		/*Dolby Vision standard case*/
-@@ -2200,9 +2251,38 @@
+@@ -2200,9 +2252,38 @@
  			}
  		}
  	}
 -	spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
- }
- 
++}
++
 +/* R7: the lock-free body is shared by the original void API and the new
 + * checked entry, so readiness and acceptance are decided under one lock.
 + */
@@ -2587,9 +2588,9 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
 +	spin_lock_irqsave(&hdmitx_device.edid_spinlock, flags);
 +	__hdmitx_set_vsif_pkt_locked(type, tunnel_mode, data, signal_sdr);
 +	spin_unlock_irqrestore(&hdmitx_device.edid_spinlock, flags);
-+}
+ }
 +EXPORT_SYMBOL(hdmitx_set_vsif_pkt);
-+
+ 
 +int hdmitx_set_vsif_pkt_checked(enum eotf_type type, enum mode_type tunnel_mode,
 +				struct dv_vsif_para *data, bool signal_sdr)
 +{
