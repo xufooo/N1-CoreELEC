@@ -86,6 +86,11 @@ static struct delayed_work dv_inj_watchdog;
 static void schedule_delayed_work(struct delayed_work *w, unsigned long d) { (void)w; (void)d; }
 static void cancel_delayed_work_sync(struct delayed_work *w) { (void)w; }
 #define INIT_DELAYED_WORK(w, f) do { (void)(w); (void)(f); } while (0)
+static bool dv_inj_stream_running;
+static bool dv_inj_transport_requested;
+static bool dv_injection_force_422_12(void) { return dv_injection_enable; }
+static int hdmitx_prepare_output_for_injection(void) { return 0; }
+static void dv_injection_release_output(void);
 static unsigned long dv_injection_torn_frames;
 static void dv_injection_output_seen_bad_frame(void) { dv_injection_torn_frames++; }
 
@@ -164,6 +169,7 @@ static void test_layout(void) {
 }
 static void reset(void) {
     dv_injection_enable=true; dv_injection_active=false;
+    dv_inj_stream_running=true; dv_inj_transport_requested=true;
     dm_metadata_size=181; dv_injection_path=0;
     always_send_vsif=true; sink.ieeeoui=0x00d046;
     video_on=1; canvas_result=0; send_result=0;
@@ -206,6 +212,11 @@ static void test_lifecycle(void) {
     reset(); dv_inj_rt.ready=true;
     assert(dv_injection_render_slot(&slot));
     assert(dv_injection_block_hdr10());
+
+    /* R6: no provider means no takeover, even with a valid slot. */
+    reset(); dv_inj_rt.ready=true; dv_inj_stream_running=false;
+    assert(!dv_injection_render_slot(&slot));
+    dv_inj_stream_running=true;
 
     /* A non-DV frame at display time must hand the output back. */
     reset(); dv_inj_rt.ready=true;
