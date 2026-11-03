@@ -88,6 +88,10 @@ static void cancel_delayed_work_sync(struct delayed_work *w) { (void)w; }
 #define INIT_DELAYED_WORK(w, f) do { (void)(w); (void)(f); } while (0)
 static bool dv_inj_stream_running;
 static bool dv_inj_transport_requested;
+static bool dv_inj_transport_ready;
+static u32 dv_inj_mode_generation;
+static void dv_injection_log(int level, const char *fmt, ...) { (void)level; (void)fmt; }
+
 static bool dv_injection_force_422_12(void) { return dv_injection_enable; }
 static int hdmitx_prepare_output_for_injection(void) { return 0; }
 static void dv_injection_release_output(void);
