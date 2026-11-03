@@ -28,12 +28,22 @@ pre_make_target() {
                     ${CARGO_BASE_OPTS}"
 }
 
+# The dovi_tool tree ships no Cargo.lock either, so the dependency graph is
+# resolved from crates.io at build time.  Newer releases of the transitive
+# dependencies require a rustc newer than the one we build (1.85.1) and the
+# build fails with "rustc 1.85.1 is not supported by the following packages".
+# dovi_tool declares rust-version = "1.65.0", so let cargo's MSRV aware
+# resolver honour it instead of always picking the newest crates.
+CARGO_MSRV_POLICY="fallback"
+
 make_target() {
+  export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS="${CARGO_MSRV_POLICY}"
   cargo fetch ${CARGO_BASE_OPTS}
   cargo cbuild ${CARGO_BUILD_OPTS}
 }
 
 makeinstall_target() {
+  export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS="${CARGO_MSRV_POLICY}"
   cargo cinstall ${CARGO_BUILD_OPTS} --destdir ${SYSROOT_PREFIX}
   cargo cinstall ${CARGO_BUILD_OPTS} --destdir ${INSTALL}
 }
