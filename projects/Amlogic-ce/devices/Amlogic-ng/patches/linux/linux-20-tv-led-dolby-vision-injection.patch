@@ -151,10 +151,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..aaa11111aaa
+index 0000000000..ccc33333ccc
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2353 @@
+@@ -0,0 +1,2363 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -1343,8 +1343,13 @@ index 0000000000..aaa11111aaa
 +		const struct vinfo_s *vinfo = get_current_vinfo();
 +
 +		WRITE_ONCE(dv_inj_canvas_dirty, false);
-+		if (vinfo && dv_injection_resolve_canvas(vinfo))
++		if (vinfo && dv_injection_resolve_canvas(vinfo)) {
++			/* R3: no usable target means no injection - hand the output
++			 * back rather than keeping a stale ready state.
++			 */
 +			dv_injection_log(1, "dv injection: canvas re-resolve failed\n");
++			WRITE_ONCE(dv_inj_release_needed, true);
++		}
 +	}
 +	schedule_delayed_work(&dv_inj_watchdog, msecs_to_jiffies(1000));
 +}
@@ -1423,7 +1428,12 @@ index 0000000000..aaa11111aaa
 +	mutex_unlock(&dv_injection_lock);
 +	WRITE_ONCE(dv_inj_transport_ready, false);
 +	WRITE_ONCE(dv_inj_transport_requested, false);
-+	hdmitx_prepare_output_for_injection();
++	/* R1: the reference always checks the restore too - a silent failure here
++	 * would leave the display on 422/12-bit after injection is off. */
++	ret = hdmitx_prepare_output_for_injection();
++	if (ret)
++		dv_injection_log(0, "dv injection: output restore failed (%d)\n",
++				 ret);
 +	cancel_delayed_work_sync(&dv_inj_watchdog);
 +	return 0;
 +}
