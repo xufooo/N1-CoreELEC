@@ -132,10 +132,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..ffff6666ffff
+index 0000000000..123412341234
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2202 @@
+@@ -0,0 +1,2203 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -938,18 +938,15 @@ index 0000000000..ffff6666ffff
 +
 +
 +extern bool hdmitx_vsif_tx_ready(void);
++extern int hdmitx_set_vsif_pkt_checked(enum eotf_type type,
++				      enum mode_type tunnel_mode,
++				      struct dv_vsif_para *data, bool signal_sdr);
 +extern int hdmitx_prepare_output_for_injection(void);
 +
 +static int dv_injection_send_vsif(const struct vinfo_s *vinfo)
 +{
 +	struct dv_vsif_para vsif;
 +
-+	/* F7: hdmitx_set_vsif_pkt() silently drops the packet when the
-+	 * synthesizer is not ready or a BIST pattern owns the output, so check
-+	 * before claiming the output was taken over.
-+	 */
-+	if (!hdmitx_vsif_tx_ready())
-+		return -EAGAIN;
 +	if (!vinfo || !vinfo->vout_device ||
 +	    !vinfo->vout_device->fresh_tx_vsif_pkt ||
 +	    !vinfo->vout_device->dv_info ||
@@ -967,8 +964,12 @@ index 0000000000..ffff6666ffff
 +	 * the injection path - swapping the enum here would also change the AVI
 +	 * declaration, which is not what the reference does.
 +	 */
-+	vinfo->vout_device->fresh_tx_vsif_pkt(EOTF_T_DOLBYVISION,
-+					      RGB_8BIT, &vsif, false);
++	/* R7: readiness and acceptance happen under one driver lock, so the
++	 * packet cannot be dropped between a check and the send.
++	 */
++	if (hdmitx_set_vsif_pkt_checked(EOTF_T_DOLBYVISION, RGB_8BIT,
++					&vsif, false))
++		return -EAGAIN;
 +	dv_injection_log(2, "dv injection: VSIF sent\n");
 +	return 0;
 +}
@@ -2455,7 +2456,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type
  	tunnel_mode, struct dv_vsif_para *data, bool switch_to_sdr);
  static void hdmitx_set_hdr10plus_pkt(unsigned int flag,
-@@ -102,7 +122,27 @@
+@@ -102,6 +122,26 @@
  	.frac_rate_policy = 1,
  	.cec_func_config = 0x7f
  };
@@ -2478,11 +2479,10 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
 +	return ok;
 +}
 +EXPORT_SYMBOL(hdmitx_vsif_tx_ready);
- 
 +
+ 
  static const struct dv_info dv_dummy;
  static int log_level;
- static bool dovi_tv_led_bt2020 = false;
 @@ -686,6 +726,17 @@
  				int cs = para->cs;
  				switch (hdev->hdmi_current_tunnel_mode) {
@@ -2515,9 +2515,103 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  							para->cd = COLORDEPTH_24B;
  						break;
  					case RGB_10_12BIT:
+@@ -1860,7 +1918,7 @@
+ struct vsif_debug_save vsif_debug_info;
+ struct vsif_debug_save hsty_vsif_config_data[8];
+ unsigned int hsty_vsif_config_loc, hsty_vsif_config_num;
+-void hdmitx_set_vsif_pkt(enum eotf_type type,
++static void __hdmitx_set_vsif_pkt_locked(enum eotf_type type,
+ 	enum mode_type tunnel_mode, struct dv_vsif_para *data, bool signal_sdr)
+ {
+ 	struct hdmitx_dev *hdev = &hdmitx_device;
+@@ -1874,12 +1932,9 @@
+ 	static enum eotf_type ltype = EOTF_T_NULL;
+ 	static uint8_t ltmode = -1;
+ 	enum hdmi_tf_type hdr_type = HDMI_NONE;
+-	unsigned long flags = 0;
+ 
+ 	hdmi_debug();
+-	spin_lock_irqsave(&hdev->edid_spinlock, flags);
+ 	if (hdev->bist_lock) {
+-		spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
+ 		return;
+ 	}
+ 	if (data == NULL)
+@@ -1904,7 +1959,6 @@
+ 	if (hdev->ready == 0) {
+ 		ltype = EOTF_T_NULL;
+ 		ltmode = -1;
+-		spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
+ 		return;
+ 	}
+ 	if (hdev->rxcap.dv_info.ieeeoui != DV_IEEE_OUI) {
+@@ -1913,7 +1967,6 @@
+ 	}
+ 	if ((hdev->chip_type) < MESON_CPU_ID_GXL) {
+ 		pr_info("hdmitx: not support DolbyVision\n");
+-		spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
+ 		return;
+ 	}
+ 
+@@ -1984,7 +2037,6 @@
+ 		}
+ 		if (type == EOTF_T_DV_AHEAD) {
+ 			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB1, VEN_HB);
+-			spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
+ 			return;
+ 		}
+ 		if (type == EOTF_T_DOLBYVISION) {
+@@ -2102,7 +2154,6 @@
+ 		}
+ 		if (type == EOTF_T_DV_AHEAD) {
+ 			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB2, VEN_HB);
+-			spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
+ 			return;
+ 		}
+ 		/*Dolby Vision standard case*/
+@@ -2200,9 +2251,38 @@
+ 			}
+ 		}
+ 	}
+-	spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
+ }
+ 
++/* R7: the lock-free body is shared by the original void API and the new
++ * checked entry, so readiness and acceptance are decided under one lock.
++ */
++void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type tunnel_mode,
++			 struct dv_vsif_para *data, bool signal_sdr)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&hdmitx_device.edid_spinlock, flags);
++	__hdmitx_set_vsif_pkt_locked(type, tunnel_mode, data, signal_sdr);
++	spin_unlock_irqrestore(&hdmitx_device.edid_spinlock, flags);
++}
++EXPORT_SYMBOL(hdmitx_set_vsif_pkt);
++
++int hdmitx_set_vsif_pkt_checked(enum eotf_type type, enum mode_type tunnel_mode,
++				struct dv_vsif_para *data, bool signal_sdr)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&hdmitx_device.edid_spinlock, flags);
++	if (hdmitx_device.bist_lock || !hdmitx_device.ready) {
++		spin_unlock_irqrestore(&hdmitx_device.edid_spinlock, flags);
++		return -EAGAIN;
++	}
++	__hdmitx_set_vsif_pkt_locked(type, tunnel_mode, data, signal_sdr);
++	spin_unlock_irqrestore(&hdmitx_device.edid_spinlock, flags);
++	return 0;
++}
++EXPORT_SYMBOL(hdmitx_set_vsif_pkt_checked);
++
+ struct hdr10plus_para hdr10p_config_data;
+ struct hdr10plus_para hsty_hdr10p_config_data[8];
+ unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..abcd7777abcd
+index 0000000000..987698769876
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
 @@ -0,0 +1,29 @@
