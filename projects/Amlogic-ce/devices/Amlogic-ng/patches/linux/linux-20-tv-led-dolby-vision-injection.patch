@@ -81,14 +81,17 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  	u32 index = fence_map->fb_index;
  	bool free_scale_set = false;
  
-@@ -4692,10 +4701,20 @@
+@@ -4691,11 +4700,23 @@
+ 			osd_hw.free_scale_mode_backup[index];
  		free_scale_set = true;
  	}
- 	return free_scale_set;
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+	/* R3: the canvas switch above has taken effect. */
++	/* R3: notify only once the canvas switch has really happened, and before
++	 * the function returns.
++	 */
 +	dv_injection_note_canvas_committed();
 +#endif
+ 	return free_scale_set;
  }
  
  static bool osd_direct_compose_pan_display(struct osd_fence_map_s *fence_map)
@@ -102,17 +105,19 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  	u32 index = fence_map->fb_index;
  	u32 ext_addr = fence_map->ext_addr;
  	u32 width_src = 0, width_dst = 0, height_src = 0, height_dst = 0;
-@@ -4898,6 +4917,10 @@
+@@ -4897,6 +4918,12 @@
+ 		}
  	}
  	fence_map->ext_addr = ext_addr;
- 	return freescale_update;
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+	/* R3: the canvas switch above has taken effect. */
++	/* R3: notify only once the canvas switch has really happened, and before
++	 * the function returns.
++	 */
 +	dv_injection_note_canvas_committed();
 +#endif
+ 	return freescale_update;
  }
  
- static void osd_pan_display_single_fence(struct osd_fence_map_s *fence_map)
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
 index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
@@ -151,10 +156,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..eee55555eee
+index 0000000000..fff66666fff
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2417 @@
+@@ -0,0 +1,2457 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -903,11 +908,16 @@ index 0000000000..eee55555eee
 +	u64 page_bytes;
 +	u32 pages;
 +	u32 canvas_index = READ_ONCE(osd_canvas);
++	u32 gen_at_entry;
 +	int ret = -EINVAL;
 +
 +	if (READ_ONCE(bytes_per_pixel) != 4 || canvas_index > 255)
 +		return -EINVAL;
 +
++	/* Read the generation before touching the candidate state, so a change
++	 * that happens during the read is detected instead of being masked.
++	 */
++	gen_at_entry = READ_ONCE(dv_inj_buffer_generation);
 +	console_lock();
 +	info = registered_fb[0];
 +	if (!info || !lock_fb_info(info))
@@ -932,12 +942,16 @@ index 0000000000..eee55555eee
 +	 */
 +	{
 +		unsigned long pflags;
-+		u32 gen = READ_ONCE(dv_inj_buffer_generation);
 +
 +		spin_lock_irqsave(&dv_inj_publish_lock, pflags);
-+		if (gen == READ_ONCE(dv_inj_buffer_generation) &&
++		/* The public enable bit must not gate preparation: it is false
++		 * until the transport is ready, which would make the very first
++		 * enable fail here.
++		 */
++		if (gen_at_entry == READ_ONCE(dv_inj_buffer_generation) &&
 +		    READ_ONCE(dv_inj_canvas_committed) &&
-+		    READ_ONCE(dv_injection_enable)) {
++		    (READ_ONCE(dv_inj_transport_requested) ||
++		     READ_ONCE(dv_injection_enable))) {
 +			WRITE_ONCE(osd_pixel_offset, (unsigned int)(page_bytes / 4));
 +			WRITE_ONCE(dv_inj_rt.base,
 +				   (u8 __iomem *)info->screen_base);
@@ -1165,14 +1179,18 @@ index 0000000000..eee55555eee
 +	/* R2: a new provider is a new stream - give it its own generation so
 +	 * nothing from the previous one can be reused, then allow commits.
 +	 */
-+	if (!READ_ONCE(dv_injection_enable))
-+		return;
 +	mutex_lock(&dv_injection_lock);
-+	WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
-+	spin_lock_irqsave(&dv_inj_publish_lock, flags);
-+	memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
-+	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	/* Always record that a stream is running: a provider can start before
++	 * injection is enabled, and enable() must not see a stale 'stopped'.
++	 */
 +	WRITE_ONCE(dv_inj_stream_running, true);
++	if (READ_ONCE(dv_injection_enable)) {
++		WRITE_ONCE(dv_inj_generation,
++			   READ_ONCE(dv_inj_generation) + 1);
++		spin_lock_irqsave(&dv_inj_publish_lock, flags);
++		memset(dv_inj_pool, 0, sizeof(dv_inj_pool));
++		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
++	}
 +	mutex_unlock(&dv_injection_lock);
 +}
 +EXPORT_SYMBOL(dv_injection_stream_started);
@@ -1186,10 +1204,18 @@ index 0000000000..eee55555eee
 +		return;
 +	WRITE_ONCE(dv_inj_stream_running, false);
 +	/* R2: let any commit already in progress finish before the slots and the
-+	 * output state are torn down.
++	 * output state are torn down - and do not tear them down if it did not.
 +	 */
 +	for (i = 0; i < 50 && READ_ONCE(dv_inj_render_busy) > 0; i++)
 +		usleep_range(1000, 2000);
++	if (READ_ONCE(dv_inj_render_busy) > 0) {
++		/* Still in flight: forbid new commits now, finish the teardown
++		 * from the watchdog once they drain.
++		 */
++		WRITE_ONCE(dv_inj_release_needed, true);
++		dv_injection_log(1, "dv injection: stream stop deferred, render busy\n");
++		return;
++	}
 +	mutex_lock(&dv_injection_lock);
 +	WRITE_ONCE(dv_inj_generation, READ_ONCE(dv_inj_generation) + 1);
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
@@ -1367,6 +1393,12 @@ index 0000000000..eee55555eee
 +		}
 +	}
 +	if (READ_ONCE(dv_inj_release_needed)) {
++		if (READ_ONCE(dv_inj_render_busy) > 0) {
++			/* still draining - look again next tick */
++			schedule_delayed_work(&dv_inj_watchdog,
++					      msecs_to_jiffies(1000));
++			return;
++		}
 +		WRITE_ONCE(dv_inj_release_needed, false);
 +		mutex_lock(&dv_injection_lock);
 +		dv_injection_release_output();
@@ -1477,9 +1509,18 @@ index 0000000000..eee55555eee
 +	mutex_unlock(&dv_injection_lock);
 +	WRITE_ONCE(dv_inj_transport_ready, false);
 +	WRITE_ONCE(dv_inj_transport_requested, false);
-+	/* R2: wait for commits already inside before restoring the output. */
++	/* R2: wait for commits already inside before restoring the output.  If
++	 * they do not drain, defer the restore instead of racing it.
++	 */
 +	for (i = 0; i < 50 && READ_ONCE(dv_inj_render_busy) > 0; i++)
 +		usleep_range(1000, 2000);
++	if (READ_ONCE(dv_inj_render_busy) > 0) {
++		WRITE_ONCE(dv_inj_release_needed, true);
++		schedule_delayed_work(&dv_inj_watchdog,
++				      msecs_to_jiffies(1000));
++		dv_injection_log(0, "dv injection: disable deferred, render busy\n");
++		return -EBUSY;
++	}
 +	/* R1: the reference always checks the restore too - a silent failure here
 +	 * would leave the display on 422/12-bit after injection is off. */
 +	ret = hdmitx_prepare_output_for_injection();
@@ -2456,9 +2497,12 @@ index 0000000000..eee55555eee
 +	 * the first frame, otherwise the very first VSIF goes out over an 8-bit
 +	 * pipe and the DM bits are gone.
 +	 */
-+	return READ_ONCE(dv_injection_enable) &&
-+	       (READ_ONCE(dv_inj_transport_requested) ||
-+		READ_ONCE(dv_injection_active));
++	/* Deliberately independent of the public enable bit: preparation happens
++	 * while enable is still false, and that is exactly when the driver needs
++	 * to be told to use 422/12-bit.
++	 */
++	return READ_ONCE(dv_inj_transport_requested) ||
++	       READ_ONCE(dv_injection_active);
 +}
 +EXPORT_SYMBOL(dv_injection_force_422_12);
 +
@@ -2519,6 +2563,7 @@ index 0000000000..eee55555eee
 +		       sizeof(dv_inj_static_slot.pixel_data));
 +		dv_inj_static_slot.num_pkts = dm_packet.num_pkts;
 +		dv_inj_static_slot.generation = READ_ONCE(dv_inj_generation);
++		dv_inj_static_slot.mode_gen = READ_ONCE(dv_inj_mode_generation);
 +		WRITE_ONCE(dv_inj_static_slot.valid, true);
 +		spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +		strcpy(dv_metadata, val);
