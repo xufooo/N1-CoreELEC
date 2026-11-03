@@ -81,7 +81,15 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  	u32 index = fence_map->fb_index;
  	bool free_scale_set = false;
  
-@@ -4696,6 +4705,12 @@
+@@ -4692,10 +4701,20 @@
+ 		free_scale_set = true;
+ 	}
+ 	return free_scale_set;
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* R3: the canvas switch above has taken effect. */
++	dv_injection_note_canvas_committed();
++#endif
+ }
  
  static bool osd_direct_compose_pan_display(struct osd_fence_map_s *fence_map)
  {
@@ -94,6 +102,17 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  	u32 index = fence_map->fb_index;
  	u32 ext_addr = fence_map->ext_addr;
  	u32 width_src = 0, width_dst = 0, height_src = 0, height_dst = 0;
+@@ -4898,6 +4917,10 @@
+ 	}
+ 	fence_map->ext_addr = ext_addr;
+ 	return freescale_update;
++#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
++	/* R3: the canvas switch above has taken effect. */
++	dv_injection_note_canvas_committed();
++#endif
+ }
+ 
+ static void osd_pan_display_single_fence(struct osd_fence_map_s *fence_map)
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
 index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
@@ -132,10 +151,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..cafe1111cafe
+index 0000000000..dead3333dead
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2235 @@
+@@ -0,0 +1,2276 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -452,6 +471,12 @@ index 0000000000..cafe1111cafe
 + * re-resolves in process context; the interrupt never does.
 + */
 +static bool dv_inj_canvas_dirty;
++/* R3: before_change/after_commit split.  A change revokes the runtime and bumps
++ * the generation; only a committed canvas may be re-bound, and only for the
++ * generation the change produced.
++ */
++static bool dv_inj_canvas_committed;
++static u32 dv_inj_buffer_generation;
 +
 +/* 0: per-frame metadata from the decoder (playback), 1: static buffer (debug) */
 +static unsigned int vdr_dm_data_source;
@@ -894,12 +919,30 @@ index 0000000000..cafe1111cafe
 +		READ_ONCE(packet_repeat), &page_bytes, &pages);
 +	if (ret)
 +		goto out_fb;
-+	WRITE_ONCE(osd_pixel_offset, (unsigned int)(page_bytes / 4));
-+	WRITE_ONCE(dv_inj_rt.base, (u8 __iomem *)info->screen_base);
-+	WRITE_ONCE(dv_inj_rt.page_bytes, (u32)page_bytes);
-+	WRITE_ONCE(dv_inj_rt.pages, pages);
-+	WRITE_ONCE(dv_inj_rt.ready, true);
-+	ret = 0;
++	/* R3: publish every runtime field once, under the lock the interrupt
++	 * uses, and only for the generation we resolved against.
++	 */
++	{
++		unsigned long pflags;
++		u32 gen = READ_ONCE(dv_inj_buffer_generation);
++
++		spin_lock_irqsave(&dv_inj_publish_lock, pflags);
++		if (gen == READ_ONCE(dv_inj_buffer_generation) &&
++		    READ_ONCE(dv_inj_canvas_committed) &&
++		    READ_ONCE(dv_injection_enable)) {
++			WRITE_ONCE(osd_pixel_offset, (unsigned int)(page_bytes / 4));
++			WRITE_ONCE(dv_inj_rt.base,
++				   (u8 __iomem *)info->screen_base);
++			WRITE_ONCE(dv_inj_rt.page_bytes, (u32)page_bytes);
++			WRITE_ONCE(dv_inj_rt.pages, pages);
++			WRITE_ONCE(dv_inj_rt.ready, true);
++			ret = 0;
++		} else {
++			WRITE_ONCE(dv_inj_rt.ready, false);
++			ret = -EAGAIN;
++		}
++		spin_unlock_irqrestore(&dv_inj_publish_lock, pflags);
++	}
 +out_fb:
 +	unlock_fb_info(info);
 +out_console:
@@ -1057,9 +1100,25 @@ index 0000000000..cafe1111cafe
 +	 */
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +	WRITE_ONCE(dv_inj_rt.ready, false);
++	WRITE_ONCE(dv_inj_buffer_generation,
++		   READ_ONCE(dv_inj_buffer_generation) + 1);
++	WRITE_ONCE(dv_inj_canvas_committed, false);
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	WRITE_ONCE(dv_inj_canvas_dirty, true);
 +}
++
++/* R3: called once the driver has actually switched/committed the canvas.  The
++ * watchdog only re-binds a canvas that reached this point, so it cannot revive
++ * the address that was valid before the switch.
++ */
++void dv_injection_note_canvas_committed(void)
++{
++	if (!READ_ONCE(dv_injection_enable))
++		return;
++	WRITE_ONCE(dv_inj_canvas_committed, true);
++	WRITE_ONCE(dv_inj_canvas_dirty, true);
++}
++EXPORT_SYMBOL(dv_injection_note_canvas_committed);
 +EXPORT_SYMBOL(dv_injection_note_canvas_change);
 +
 +
@@ -1214,7 +1273,8 @@ index 0000000000..cafe1111cafe
 +	}
 +	/* Re-resolve after OSD activity: the canvas address or the fb mapping may
 +	 * have moved.  A failure keeps the previous state and is counted. */
-+	if (READ_ONCE(dv_inj_canvas_dirty)) {
++	if (READ_ONCE(dv_inj_canvas_dirty) &&
++	    READ_ONCE(dv_inj_canvas_committed)) {
 +		const struct vinfo_s *vinfo = get_current_vinfo();
 +
 +		WRITE_ONCE(dv_inj_canvas_dirty, false);
@@ -2669,10 +2729,10 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..beef2222beef
+index 0000000000..feed4444feed
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,29 @@
+@@ -0,0 +1,30 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -2696,6 +2756,7 @@ index 0000000000..beef2222beef
 +void dv_injection_new_stream(void);
 +void dv_injection_stream_started(void);
 +void dv_injection_note_canvas_change(void);
++void dv_injection_note_canvas_committed(void);
 +void dv_injection_note_osd_activity(void);
 +
 +/* hand over the raw DM metadata bytes (user space / Kodi) */
