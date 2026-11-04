@@ -45,34 +45,44 @@ make_host() {
   cargo build --release --manifest-path ${PKG_BUILD}/Cargo.toml
 }
 
-makeinstall_host() {
+cargo_c_build() {
+  export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS="${CARGO_MSRV_POLICY}"
+  # Pin the target directory so the install step finds the binaries again.
+  export CARGO_TARGET_DIR="${PKG_BUILD}/cargo-c-target"
   cargo_prepare_lock
+  cargo build --release --manifest-path ${PKG_BUILD}/Cargo.toml
+}
 
+make_host() {
+  cargo_c_build
+}
+
+makeinstall_host() {
   # `cargo install --path` resolves the dependency graph again from scratch
   # and ignores the Cargo.lock we pinned above, so it picked ignore 0.4.30
   # again and the install step died with the same let-chains error.  Install
-  # the binary that was already built with the pinned lock instead, the same
-  # way packages/rust/cargo and packages/rust/bindgen-cli do it.  ${TOOLCHAIN}/bin
-  # is the first entry of PATH (config/path), so `cargo cbuild` finds cargo-c.
-  cargo build --release --manifest-path ${PKG_BUILD}/Cargo.toml
-
-  cargo_c_bin=""
-  for cargo_c_dir in "${CARGO_TARGET_DIR:-}" "${PKG_BUILD}/.${RUST_HOST}/target" "${PKG_BUILD}/target"; do
-    [ -n "${cargo_c_dir}" ] || continue
-    if [ -x "${cargo_c_dir}/release/cargo-c" ]; then
-      cargo_c_bin="${cargo_c_dir}/release/cargo-c"
-      break
-    fi
-  done
-  if [ -z "${cargo_c_bin}" ]; then
-    echo "ERROR: cargo-c binary not found after the host build" >&2
-    return 1
-  fi
+  # the binaries that were already built with the pinned lock instead.
+  #
+  # cargo-c ships several binaries (cargo-capi, cargo-cbuild, cargo-cinstall,
+  # cargo-ctest) and `cargo cbuild` / `cargo cinstall` look them up by name in
+  # PATH.  `cargo install --path` puts them into ${CARGO_HOME}/bin, which is
+  # not part of PATH (config/path only prepends ${TOOLCHAIN}/bin), so
+  # ${TOOLCHAIN}/bin is where they have to end up.
+  cargo_c_build
 
   mkdir -p ${TOOLCHAIN}/bin
-  cp -a "${cargo_c_bin}" ${TOOLCHAIN}/bin/
-  if [ -n "${CARGO_HOME}" ]; then
-    mkdir -p "${CARGO_HOME}/bin"
-    cp -a "${cargo_c_bin}" "${CARGO_HOME}/bin/"
+  for cargo_c_bin in "${CARGO_TARGET_DIR}"/release/cargo-*; do
+    [ -x "${cargo_c_bin}" ] || continue
+    cp -a "${cargo_c_bin}" ${TOOLCHAIN}/bin/
+    if [ -n "${CARGO_HOME}" ]; then
+      mkdir -p "${CARGO_HOME}/bin"
+      cp -a "${cargo_c_bin}" "${CARGO_HOME}/bin/"
+    fi
+  done
+
+  if [ ! -x "${TOOLCHAIN}/bin/cargo-cbuild" ]; then
+    echo "ERROR: cargo-cbuild was not installed; ${CARGO_TARGET_DIR}/release holds:" >&2
+    ls -la "${CARGO_TARGET_DIR}/release" >&2 || true
+    return 1
   fi
 }
