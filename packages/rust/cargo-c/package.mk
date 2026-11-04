@@ -49,6 +49,15 @@ cargo_c_build() {
   export CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS="${CARGO_MSRV_POLICY}"
   # Pin the target directory so the install step finds the binaries again.
   export CARGO_TARGET_DIR="${PKG_BUILD}/cargo-c-target"
+  # openssl-sys links against whatever OpenSSL pkg-config reports, which in
+  # this build is the one in our host toolchain (3.2.x).  The resulting
+  # binaries record a plain DT_NEEDED of libssl.so.3, so at run time the
+  # loader picks the older system library (3.0.x) and the helper refuses to
+  # start with
+  #   version `OPENSSL_3.2.0' not found (required by .../cargo-cbuild)
+  # Bake an RPATH to the toolchain libraries into the binaries so they
+  # always resolve the exact OpenSSL they were linked against.
+  export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,-rpath,${TOOLCHAIN}/lib"
   cargo_prepare_lock
   cargo build --release --manifest-path ${PKG_BUILD}/Cargo.toml
 }
@@ -85,4 +94,18 @@ makeinstall_host() {
     ls -la "${CARGO_TARGET_DIR}/release" >&2 || true
     return 1
   fi
+
+  # Smoke test the installed helper.  A run time problem (for example an
+  # OpenSSL that cannot be loaded) would otherwise only surface hours later,
+  # in the package that finally calls `cargo cbuild`, and would cost another
+  # full image build.  Only a loader failure is treated as fatal.
+  cargo_c_smoke=$(LD_LIBRARY_PATH="${TOOLCHAIN}/lib:${LD_LIBRARY_PATH}" \
+                  "${TOOLCHAIN}/bin/cargo-cbuild" --version 2>&1 || true)
+  case "${cargo_c_smoke}" in
+    *"error while loading shared libraries"*|*"not found"*)
+      echo "ERROR: cargo-cbuild cannot run: ${cargo_c_smoke}" >&2
+      return 1
+      ;;
+  esac
+  echo "cargo-cbuild runs: ${cargo_c_smoke}" >&2
 }

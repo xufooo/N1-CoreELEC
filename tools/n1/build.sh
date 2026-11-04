@@ -13,7 +13,11 @@ test "$(id -u)" != 0 || { echo 'Do not build as root.' >&2; exit 1; }
 export PROJECT=Amlogic-ce DEVICE=Amlogic-ng ARCH=arm N1_BUILD=yes
 export N1_IMAGE_ONLY=yes
 export CCACHE_DIR="$PWD/.ccache" AUTOREMOVE=yes
-export THREADCOUNT=2 CONCURRENCY_MAKE_LEVEL=4 CONCURRENCY_LOAD=6
+# The runner has 4 vCPUs and 16 GB of RAM.  Two parallel packages leave the
+# machine half idle for hours (the image build needs the Rust toolchain plus
+# every system package plus Kodi), three keep the CPU busy while staying
+# inside the memory budget.
+export THREADCOUNT=3 CONCURRENCY_MAKE_LEVEL=4 CONCURRENCY_LOAD=6
 export CUSTOM_VERSION=21.3-Omega-N1-r1
 # The default image name would be CoreELEC-Amlogic-ng.arm-21.3-Omega-N1-r1,
 # which carries no "Phicomm_N1" and therefore matches neither the CI upload

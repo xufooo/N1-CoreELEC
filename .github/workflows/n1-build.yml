@@ -19,7 +19,10 @@ concurrency:
 jobs:
   firmware:
     runs-on: ubuntu-22.04
-    timeout-minutes: 350
+    # The full image build needs the Rust toolchain from source plus every
+    # system package plus Kodi; on a 4 vCPU runner that is right at the
+    # 6 hour ceiling GitHub allows for a hosted job.
+    timeout-minutes: 360
     env:
       BUILD_TARGET: ${{ inputs.target }}
     steps:
