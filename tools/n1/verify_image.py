@@ -16,7 +16,7 @@ def run(*args):
 
 
 def verify(target, image_only=False):
-    images = list(target.glob('*Phicomm_N1.img.gz'))
+    images = list(target.glob('*.img.gz'))
     archives = list(target.glob('*.tar'))
     expected_archives = 0 if image_only else 1
     if len(images) != 1 or len(archives) != expected_archives:

@@ -97,7 +97,7 @@ jobs:
         with:
           name: n1-21.3-usb-baseline-${{ github.run_id }}
           path: |
-            target/*Phicomm_N1.img.gz
+            target/*.img.gz
             target/SHA256SUMS.sha256
             output/source-manifest.json
           if-no-files-found: error

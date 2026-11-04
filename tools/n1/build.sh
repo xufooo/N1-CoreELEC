@@ -15,6 +15,10 @@ export N1_IMAGE_ONLY=yes
 export CCACHE_DIR="$PWD/.ccache" AUTOREMOVE=yes
 export THREADCOUNT=2 CONCURRENCY_MAKE_LEVEL=4 CONCURRENCY_LOAD=6
 export CUSTOM_VERSION=21.3-Omega-N1-r1
+# The default image name would be CoreELEC-Amlogic-ng.arm-21.3-Omega-N1-r1,
+# which carries no "Phicomm_N1" and therefore matches neither the CI upload
+# glob nor tools/n1/verify_image.py.  Pin the USB image name.
+export CUSTOM_IMAGE_NAME=Phicomm_N1
 export BUILDER_NAME=N1 BUILDER_VERSION="$(git rev-parse --short=12 HEAD)"
 mkdir -p output .coreelec
 printf '%s\n' 'CCACHE_CACHE_SIZE="2G"' > .coreelec/options
