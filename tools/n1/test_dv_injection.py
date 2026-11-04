@@ -59,6 +59,17 @@ typedef uint8_t u8; typedef uint32_t u32; typedef uint64_t u64;
 #define DV_INJ_MAX_NUM_HDR_DM_PACKETS 5
 #define DV_INJ_NUM_HDR_DM_PACKET_REPEATS 3
 #define DV_INJ_PIXELS_PER_PKT 1024
+#define DV_INJ_NUM_BYTES_PER_PACKET 128
+#define DV_INJ_CRC_OFFSET 124
+#define DV_INJ_BITS_PER_BYTE 8
+#define DV_INJ_ODD_INJECTION 0xFFFFFFFF
+#define DV_INJ_EVEN_INJECTION 0xFF000000
+enum hdr_dm_packet_type { DV_INJ_FIRST_AND_ONLY_PKT = 0,
+                          DV_INJ_FIRST_OF_MULTIPLE_PKT,
+                          DV_INJ_CONTINUING_PKT,
+                          DV_INJ_LAST_OF_MULTIPLE_PKT };
+static unsigned int odd_pattern = DV_INJ_ODD_INJECTION;
+static unsigned int even_pattern = DV_INJ_EVEN_INJECTION;
 #define READ_ONCE(x) (x)
 #define __iomem
 #define WRITE_ONCE(x,v) ((x)=(v))
@@ -239,8 +250,21 @@ static int dv_injection_resolve_canvas(const struct vinfo_s *vinfo)
 '''
 
 MAIN = r'''
+/* The reference TV-led implementation ships this exact Display Management
+ * payload as its static vdr_dm_data buffer (82 bytes: 70 byte fixed header,
+ * one level 1 extension block of 6 bytes).  It must validate here, because
+ * the packetiser hands the same bytes to the TV. */
+static const u8 reference_dm[] = {
+    0, 0, 32, 0, 3, 31, 6, 145, 32, 0, 252, 91, 4, 67, 32, 0,
+    1, 11, 234, 87, 0, 0, 0, 0, 8, 0, 0, 0, 8, 0, 0, 0,
+    66, 185, 254, 163, 254, 163, 254, 163, 66, 185, 254, 163, 254, 163, 254, 163,
+    66, 185, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 12, 2, 1, 1,
+    0, 62, 11, 134, 0, 42, 1, 0, 0, 0, 6, 1, 0, 62, 11, 134,
+    2, 251,
+};
 static void test_metadata(void) {
     u8 bad[594];
+    assert(dv_injection_validate_metadata(reference_dm,sizeof(reference_dm)) == 0);
     assert(dv_injection_validate_metadata(capture,sizeof(capture)) == 0);
     for (unsigned n=0;n<sizeof(capture);n++)
         assert(dv_injection_validate_metadata(capture,n) == -EINVAL);
@@ -579,12 +603,133 @@ static void test_state_machine(void) {
     assert(dv_inj_state==DV_INJ_READY && dv_inj_transport_ready && dv_inj_accepting);
 }
 
+/* ------------------------------------------------------------------
+ * Oracle: the TV-led reference implementation (the proven N1 scheme).
+ * The functions below are a transcription of its packet builder:
+ *   get_num_pkts() / get_hdr_dm_packet_type() / get_crc32() /
+ *   set_hdr_dm_metadata_pkts()
+ * The packet bytes produced by our module must match it exactly, because
+ * the TV - not the box - parses these 128 byte packets.
+ * ------------------------------------------------------------------ */
+static u32 ref_crc_table[256];
+static void ref_crc_init(void) {
+    u32 i, j, c;
+    for (i = 0; i < 256; i++) {
+        c = i << 24;
+        for (j = 0; j < 8; j++)
+            c = (c & 0x80000000u) ? ((c << 1) ^ 0x04C11DB7u) : (c << 1);
+        ref_crc_table[i] = c;
+    }
+}
+static u32 ref_crc32(const u8 *data, u32 size) {
+    u32 crc = 0xFFFFFFFF, i;
+    for (i = 0; i < size; i++)
+        crc = (crc << 8) ^ ref_crc_table[((crc >> 24) ^ data[i]) & 0xff];
+    return crc;
+}
+static u32 ref_num_pkts(u32 len, u32 *last_pkt_len) {
+    u32 num = 1;
+    *last_pkt_len = len;
+    if (*last_pkt_len > 119) {
+        (*last_pkt_len) -= 119;
+        while (*last_pkt_len > 121) { (*last_pkt_len) -= 121; num++; }
+        if (*last_pkt_len > 0) num++;
+    }
+    return num;
+}
+static void ref_build_packets(const u8 *dm, u32 size,
+                              u8 out[][DV_INJ_NUM_BYTES_PER_PACKET], u32 *num_pkts) {
+    u32 last_pkt_len = 0, num = ref_num_pkts(size, &last_pkt_len);
+    u32 bytes_written = 0, i;
+    for (i = 0; i < num; i++) {
+        u8 *cur = out[i];
+        u32 cur_pkt_len, pkt_offset, crc;
+        int type = (i == 0) ? ((num == 1) ? 0 : 1) : (((i + 1) != num) ? 2 : 3);
+        memset(cur, 0, DV_INJ_NUM_BYTES_PER_PACKET);
+        if (type == 0 || type == 1) {
+            cur[0] = (type == 0) ? 0 : 0x40;
+            cur[1] = dm[0];
+            cur[2] = 0;
+            cur[3] = (u8)(size >> 8);
+            cur[4] = (u8)(size & 0xFF);
+            cur_pkt_len = (type == 0) ? last_pkt_len : 119;
+            pkt_offset = 5;
+        } else {
+            cur[0] = (type == 3) ? 0xC0 : 0x80;
+            cur[1] = dm[0];
+            cur[2] = 0;
+            cur_pkt_len = (type == 3) ? last_pkt_len : 121;
+            pkt_offset = 3;
+        }
+        memcpy(&cur[pkt_offset], &dm[bytes_written], cur_pkt_len);
+        bytes_written += cur_pkt_len;
+        if (bytes_written == size)
+            memset(&cur[pkt_offset + cur_pkt_len], 0,
+                   DV_INJ_NUM_BYTES_PER_PACKET - 4 - pkt_offset - cur_pkt_len);
+        crc = ref_crc32(cur, DV_INJ_NUM_BYTES_PER_PACKET - 4);
+        cur[DV_INJ_CRC_OFFSET] = (u8)(crc >> 24);
+        cur[DV_INJ_CRC_OFFSET + 1] = (u8)(crc >> 16);
+        cur[DV_INJ_CRC_OFFSET + 2] = (u8)(crc >> 8);
+        cur[DV_INJ_CRC_OFFSET + 3] = (u8)crc;
+    }
+    *num_pkts = num;
+}
+static void ref_expand_pixels(const u8 byte_data[][DV_INJ_NUM_BYTES_PER_PACKET],
+                              u32 num_pkts, u32 pixel_data[][DV_INJ_PIXELS_PER_PKT]) {
+    u32 pkt, byte, bit;
+    for (pkt = 0; pkt < num_pkts; pkt++)
+        for (byte = 0; byte < DV_INJ_NUM_BYTES_PER_PACKET; byte++)
+            for (bit = 0; bit < DV_INJ_BITS_PER_BYTE; bit++)
+                pixel_data[pkt][byte * DV_INJ_BITS_PER_BYTE + bit] =
+                    (((byte_data[pkt][byte]) >> (7 - bit)) & 1) ?
+                        DV_INJ_ODD_INJECTION : DV_INJ_EVEN_INJECTION;
+}
+static void test_packets(void) {
+    /* Sizes around the 119/121 byte payload boundaries of the format. */
+    static const u32 sizes[] = {1, 70, 82, 118, 119, 120, 121, 240, 241, 362, 594};
+    u8 dm[594];
+    unsigned i, s;
+    ref_crc_init();
+    for (i = 0; i < sizeof(dm); i++)
+        dm[i] = (u8)(0xA0 + i);
+    for (s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+        u32 size = sizes[s];
+        u8 ours[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_NUM_BYTES_PER_PACKET];
+        u8 theirs[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_NUM_BYTES_PER_PACKET];
+        u32 our_pixels[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_PIXELS_PER_PKT];
+        u32 ref_pix[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_PIXELS_PER_PKT];
+        u8 our_num = 0;
+        u32 ref_num = 0;
+        memset(ours, 0xAA, sizeof(ours));
+        memset(theirs, 0x55, sizeof(theirs));
+        assert(dv_injection_pack_bytes(ours, &our_num, dm, size) == 0);
+        ref_build_packets(dm, size, theirs, &ref_num);
+        assert(our_num == ref_num);
+        assert(memcmp(ours, theirs,
+                      (size_t)our_num * DV_INJ_NUM_BYTES_PER_PACKET) == 0);
+        memset(our_pixels, 0, sizeof(our_pixels));
+        memset(ref_pix, 0, sizeof(ref_pix));
+        dv_injection_expand_pixels(
+            (const u8 (*)[DV_INJ_NUM_BYTES_PER_PACKET])ours, our_num, our_pixels);
+        ref_expand_pixels(theirs, ref_num, ref_pix);
+        assert(memcmp(our_pixels, ref_pix, sizeof(our_pixels)) == 0);
+    }
+    /* Out of range payloads are rejected, not silently truncated. */
+    {
+        u8 ours[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_NUM_BYTES_PER_PACKET];
+        u8 our_num = 0;
+        assert(dv_injection_pack_bytes(ours, &our_num, dm, 0) == -EINVAL);
+        assert(dv_injection_pack_bytes(ours, &our_num, dm, 595) == -EINVAL);
+    }
+}
+
 int main(int argc,char **argv) {
     assert(argc==2);
     if(!strcmp(argv[1],"metadata")) test_metadata();
     else if(!strcmp(argv[1],"layout")) test_layout();
     else if(!strcmp(argv[1],"lifecycle")) test_lifecycle();
     else if(!strcmp(argv[1],"state")) test_state_machine();
+    else if(!strcmp(argv[1],"packets")) test_packets();
     else return 2;
     return 0;
 }
@@ -610,7 +755,9 @@ class KernelInjectionTests(unittest.TestCase):
                  "dv_injection_render_slot", "dv_injection_enable_set",
                  "should_block_vsif", "dv_injection_block_hdr10",
                  "dv_injection_render_frame",
-                 "dv_injection_force_422_12", "dv_injection_notify_output_lost")
+                 "dv_injection_force_422_12", "dv_injection_notify_output_lost",
+                 "dv_injection_crc32", "dv_injection_pkt_type",
+                 "dv_injection_pack_bytes", "dv_injection_expand_pixels")
         # Locate the definition, not the forward declaration.
         text = text.replace("static int dv_injection_enable_set(const char *val, const struct kernel_param *kp);", "")
         cfile = Path(cls.temp.name) / "contracts.c"
@@ -634,6 +781,9 @@ class KernelInjectionTests(unittest.TestCase):
 
     def test_state_machine(self):
         subprocess.run([str(self.binary),"state"],check=True)
+
+    def test_packetizer_matches_reference(self):
+        subprocess.run([str(self.binary),"packets"],check=True)
 
 
 if __name__ == "__main__":
