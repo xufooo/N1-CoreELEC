@@ -2,11 +2,20 @@ diff --git a/drivers/amlogic/media/enhancement/amvecm/amcsc.c b/drivers/amlogic/
 index bc9ac74..95845cf 100644
 --- a/drivers/amlogic/media/enhancement/amvecm/amcsc.c
 +++ b/drivers/amlogic/media/enhancement/amvecm/amcsc.c
-@@ -45,0 +46,3 @@
+@@ -43,6 +43,9 @@
+ #include <linux/amlogic/media/amdolbyvision/dolby_vision.h>
+ #include <linux/amlogic/media/video_sink/video_signal_notify.h>
+ #include <linux/amlogic/media/video_sink/video.h>
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
 +#include <linux/amlogic/media/video_sink/dv_injection.h>
 +#endif
-@@ -7325,0 +7329,8 @@ static void hdr_tx_pkt_cb(
+ #include "hdr/am_hdr10_plus.h"
+ #include "hdr/am_hdr10_plus_ootf.h"
+ #include "hdr/gamut_convert.h"
+@@ -7323,6 +7326,14 @@ static void hdr_tx_pkt_cb(
+ 	struct master_display_info_s send_info;
+ 	struct vd_signal_info_s vd_signal;
+ 
 +#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
 +	/* GXL's producer emits DRM and HDR10+ packets from this function.
 +	 * Leave the low-level HDMI callbacks free for explicit teardown.
@@ -15,7 +24,11 @@ index bc9ac74..95845cf 100644
 +		return;
 +#endif
 +
+ 	if (vinfo->vout_device)
+ 		vdev = vinfo->vout_device;
+ 
 diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_fb.c
+index 192948b..c5c0e02 100644
 --- a/drivers/amlogic/media/osd/osd_fb.c
 +++ b/drivers/amlogic/media/osd/osd_fb.c
 @@ -28,6 +28,9 @@
@@ -28,7 +41,7 @@ diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_
  #include <linux/spinlock.h>
  #include <linux/fs.h>
  #include <linux/sysfs.h>
-@@ -741,6 +744,12 @@
+@@ -741,6 +744,12 @@ osd_setcmap(struct fb_cmap *cmap, struct fb_info *info)
  
  static int osd_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
  {
@@ -41,7 +54,7 @@ diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_
  	struct osd_fb_dev_s *fbdev = (struct osd_fb_dev_s *)info->par;
  	void __user *argp = (void __user *)arg;
  	u32 src_colorkey;/* 16 bit or 24 bit */
-@@ -1492,6 +1501,13 @@
+@@ -1492,6 +1501,13 @@ static void free_osd_memory(struct fb_info *info)
  	if (info->screen_base) {
  		fbdev = (struct osd_fb_dev_s *)info->par;
  		index = fbdev->fb_index;
@@ -56,6 +69,7 @@ diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_
  			if (fb_ion_client &&
  			    fb_ion_handle[index][i]) {
 diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_hw.c
+index 12d2dfc..3719657 100644
 --- a/drivers/amlogic/media/osd/osd_hw.c
 +++ b/drivers/amlogic/media/osd/osd_hw.c
 @@ -34,6 +34,9 @@
@@ -68,7 +82,7 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  #include <linux/amlogic/cpu_version.h>
  #include <linux/cpumask.h>
  #include <linux/cpu.h>
-@@ -4625,6 +4628,15 @@
+@@ -4625,6 +4628,15 @@ static const struct color_bit_define_s *convert_hal_format(u32 format)
  
  static bool osd_ge2d_compose_pan_display(struct osd_fence_map_s *fence_map)
  {
@@ -84,7 +98,7 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  	u32 index = fence_map->fb_index;
  	bool free_scale_set = false;
  
-@@ -4691,11 +4703,26 @@
+@@ -4691,11 +4703,26 @@ static bool osd_ge2d_compose_pan_display(struct osd_fence_map_s *fence_map)
  			osd_hw.free_scale_mode_backup[index];
  		free_scale_set = true;
  	}
@@ -111,7 +125,7 @@ diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_
  	u32 index = fence_map->fb_index;
  	u32 ext_addr = fence_map->ext_addr;
  	u32 width_src = 0, width_dst = 0, height_src = 0, height_dst = 0;
-@@ -4897,6 +4924,12 @@
+@@ -4897,6 +4924,12 @@ static bool osd_direct_compose_pan_display(struct osd_fence_map_s *fence_map)
  		}
  	}
  	fence_map->ext_addr = ext_addr;
@@ -162,10 +176,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000000..ffff6aaa6fff
+index 0000000..507b3e5
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2749 @@
+@@ -0,0 +1,2743 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -1084,7 +1098,7 @@ index 0000000000..ffff6aaa6fff
 +				      enum mode_type tunnel_mode,
 +				      struct dv_vsif_para *data, bool signal_sdr);
 +extern int hdmitx_prepare_output_for_injection(void);
-+extern bool hdmitx_transport_is_422_12(void);
++extern bool hdmitx_transport_is_live(void);
 +
 +static int dv_injection_send_vsif(const struct vinfo_s *vinfo)
 +{
@@ -1516,7 +1530,7 @@ index 0000000000..ffff6aaa6fff
 +		return 0;
 +
 +	/* 1. Revoke new commits, drain the ones in flight, and only then hand the
-+	 * output back - so a later failure cannot leave force_422_12() true.
++	 * output back - so a later failure cannot leave a half published state.
 +	 */
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +	WRITE_ONCE(dv_inj_state, DV_INJ_PREPARING);
@@ -1531,15 +1545,16 @@ index 0000000000..ffff6aaa6fff
 +		return -EBUSY;
 +	dv_injection_deactivate();
 +
-+	/* 2. Program the transport.  The driver may notify from inside this call;
-+	 * that only revokes state and advances the generation, which is fine
-+	 * because the target is read afterwards.
++	/* 2. Wait for a live output.  The driver may notify from inside this
++	 * call; that only revokes state and advances the generation, which is
++	 * fine because the target is read afterwards.  The picture path itself
++	 * is never reprogrammed - see hdmitx_prepare_output_for_injection().
 +	 */
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
 +	WRITE_ONCE(dv_inj_transport_requested, true);
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	ret = hdmitx_prepare_output_for_injection();
-+	if (ret || !hdmitx_transport_is_422_12()) {
++	if (ret || !hdmitx_transport_is_live()) {
 +		ret = ret ? ret : -EAGAIN;
 +		goto undo;
 +	}
@@ -2790,20 +2805,13 @@ index 0000000000..ffff6aaa6fff
 +
 +
 +/*
-+ * The 4.9 HDMI driver maps RGB_8BIT to YUV444/8-bit, while the reference maps
-+ * it to YUV422/12-bit.  The driver asks this to force the physical transport
-+ * for the injection path only, keeping the AVI declaration as RGB.
++ * The 4.9 HDMI driver maps RGB_8BIT to the native picture path (YUV444 with
++ * the colour depth the EDID asks for).  The injection must not change that:
++ * the picture path is shared with the vout side, and reprogramming it
++ * desynchronises the two and blanks the TV.  The metadata rides on the
++ * picture as it is (metadata bits in the OSD canvas, VSIF per frame), just
++ * like the reference implementation does.
 + */
-+bool dv_injection_force_422_12(void)
-+{
-+	/* Keys off the physical request and the active state, never the public
-+	 * enable bit: preparation runs while enable is still false, and a closing
-+	 * transaction clears the request so the restore does not force 422/12.
-+	 */
-+	return READ_ONCE(dv_inj_transport_requested) ||
-+	       READ_ONCE(dv_injection_active);
-+}EXPORT_SYMBOL(dv_injection_force_422_12);
-+
 +bool dv_injection_block_hdr10(void)
 +{
 +	bool has_metadata = READ_ONCE(dv_injection_active);
@@ -2916,6 +2924,7 @@ index 0000000000..ffff6aaa6fff
 +MODULE_AUTHOR("N1-CoreELEC project");
 +MODULE_LICENSE("GPL");
 diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/video_sink/video.c
+index a93fd94..185371f 100644
 --- a/drivers/amlogic/media/video_sink/video.c
 +++ b/drivers/amlogic/media/video_sink/video.c
 @@ -44,6 +44,9 @@
@@ -2928,7 +2937,7 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  #include <linux/amlogic/media/canvas/canvas_mgr.h>
  #include <linux/dma-mapping.h>
  #include <linux/dma-contiguous.h>
-@@ -4194,6 +4197,15 @@
+@@ -4194,6 +4197,15 @@ static s32 primary_render_frame(struct video_layer_s *layer)
  	else
  		dispbuf = layer->dispbuf;
  
@@ -2944,7 +2953,7 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  	/* process cur frame for each vsync */
  	if (dispbuf) {
  		int need_afbc =
-@@ -7186,6 +7198,11 @@
+@@ -7186,6 +7198,11 @@ void init_hdr_info(void)
  static int video_receiver_event_fun(int type, void *data, void *private_data)
  {
  	if (type == VFRAME_EVENT_PROVIDER_UNREG) {
@@ -2956,7 +2965,7 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  		video_vf_unreg_provider();
  		drop_frame_count = 0;
  		receive_frame_count = 0;
-@@ -7214,13 +7231,28 @@
+@@ -7214,13 +7231,28 @@ static int video_receiver_event_fun(int type, void *data, void *private_data)
  #endif
  		update_process_hdmi_avsync_flag(false);
  	} else if (type == VFRAME_EVENT_PROVIDER_RESET) {
@@ -2985,7 +2994,7 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  		max_dis_hwc = 0;
  		min_dis_hwc = 0;
  		video_drop_vf_cnt = 0;
-@@ -7787,6 +7819,13 @@
+@@ -7787,6 +7819,13 @@ s32 update_vframe_src_fmt(
  	if (vf->src_fmt.fmt != VFRAME_SIGNAL_FMT_DOVI)
  		clear_vframe_dovi_md_info(vf);
  
@@ -3000,6 +3009,7 @@ diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/vi
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
+index 933287c..a3535bb 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 @@ -49,6 +49,9 @@
@@ -3025,11 +3035,10 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type
  	tunnel_mode, struct dv_vsif_para *data, bool switch_to_sdr);
  static void hdmitx_set_hdr10plus_pkt(unsigned int flag,
-@@ -102,7 +109,55 @@
- 	.frac_rate_policy = 1,
+@@ -103,6 +110,61 @@ static struct hdmitx_dev hdmitx_device = {
  	.cec_func_config = 0x7f
  };
-+
+ 
 +/*
 + * F7: hdmitx_set_vsif_pkt() returns void and bails out silently while the
 + * synthesizer is not ready or while a BIST pattern owns the output.  The
@@ -3050,38 +3059,45 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
 +EXPORT_SYMBOL(hdmitx_vsif_tx_ready);
 +
 +/*
-+ * R4: the injection path needs the physical transport reprogrammed when it
-+ * starts or stops, not only when somebody else changes the mode.  This
-+ * re-runs the normal mode selection so the colourspace/colourdepth branch
-+ * sees the new injection state; callers must be in process context.
++ * The metadata injection rides on the picture that is already on screen: the
++ * VSIF is handed over per frame and the metadata bits are written into the
++ * OSD canvas.  It must NOT reprogram the picture path.
++ *
++ * Re-running the mode selection (set_disp_mode_auto()) desynchronises the
++ * vout side - the framebuffer keeps its own timing and the HDMI side picks a
++ * different VIC - and the TV then shows "no signal".  Forcing a colour space
++ * or a colour depth has the same effect: para points into the static
++ * all_fmt_paras[] table, so the change would also corrupt every later mode
++ * set.  The reference implementation does neither: it only writes the
++ * metadata into the canvas and sends the VSIF.
++ *
++ * So the only thing this function may do is confirm that the output is live,
++ * i.e. a mode is programmed and a VSIF will actually be handed over.
 + */
 +int hdmitx_prepare_output_for_injection(void)
 +{
-+	if (!hdmitx_device.ready)
++	if (!hdmitx_vsif_tx_ready())
 +		return -EAGAIN;
-+	return set_disp_mode_auto();
++	return 0;
 +}
 +EXPORT_SYMBOL(hdmitx_prepare_output_for_injection);
- 
 +
-+/* R1: what the driver actually ended up programming.  enable() uses this to
-+ * confirm the 422/12-bit contract instead of assuming the request worked.
++
++/* The transport the injection relies on: a live output.  The colour space
++ * and the colour depth stay exactly as the EDID and the source ask for.
 + */
-+bool hdmitx_transport_is_422_12(void)
++bool hdmitx_transport_is_live(void)
 +{
-+	struct hdmi_format_para *para = hdmitx_device.para;
-+
-+	return para && para->cs == COLORSPACE_YUV422 &&
-+	       para->cd == COLORDEPTH_36B;
++	return hdmitx_vsif_tx_ready();
 +}
-+EXPORT_SYMBOL(hdmitx_transport_is_422_12);
++EXPORT_SYMBOL(hdmitx_transport_is_live);
 +
 +
 +
  static const struct dv_info dv_dummy;
  static int log_level;
  static bool dovi_tv_led_bt2020 = false;
-@@ -374,6 +429,12 @@
+@@ -374,6 +436,12 @@ static int hdmitx_reboot_notifier(struct notifier_block *nb,
  		hdev->debug_param.avmute_frame * hdmitx_get_frame_duration();
  
  	hdev->ready = 0;
@@ -3094,7 +3110,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  	hdev->hwop.cntlmisc(hdev, MISC_AVMUTE_OP, SET_AVMUTE);
  	if (hdev->debug_param.avmute_frame > 0)
  		msleep(mute_us / 1000);
-@@ -615,6 +676,12 @@
+@@ -615,6 +683,12 @@ static int set_disp_mode_auto(void)
  
  	memset(mode, 0, sizeof(mode));
  	hdev->ready = 0;
@@ -3107,64 +3123,16 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  
  	/* get current vinfo */
  	info = hdmitx_get_current_vinfo();
-@@ -677,6 +744,24 @@
- 	hdev->para = para;
- 	vic = hdmitx_edid_get_VIC(hdev, mode, 1);
- 
-+#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+	/* R1: the native DV switches below only run when the current EOTF is
-+	 * already Dolby Vision.  On the very first enable from SDR/HDR10 it is
-+	 * not, so the injection contract has to be applied outside that gate -
-+	 * before the physical format is programmed.
-+	 */
-+	if (dv_injection_force_422_12()) {
-+		if (para->cs != COLORSPACE_YUV422) {
-+			para->cs = COLORSPACE_YUV422;
-+			pr_info("hdmitx: dv injection forces YUV422 transport\n");
-+		}
-+		if (para->cd != COLORDEPTH_36B) {
-+			para->cd = COLORDEPTH_36B;
-+			pr_info("hdmitx: dv injection forces 12-bit transport\n");
-+		}
-+	}
-+#endif
-+
- 	// force colour subsampling when DV mode
- 	switch (hdev->hdmi_current_eotf_type) {
- 		case EOTF_T_DOLBYVISION:
-@@ -686,6 +771,17 @@
+@@ -686,6 +760,8 @@ static int set_disp_mode_auto(void)
  				int cs = para->cs;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
-+#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+						/* Reference maps RGB_8BIT to 422 for
-+						 * the transport, keeping AVI as RGB.
-+						 */
-+						if (dv_injection_force_422_12()) {
-+							para->cs = COLORSPACE_YUV422;
-+							break;
-+						}
-+#endif
 +						para->cs = COLORSPACE_YUV444;
 +						break;
  					case RGB_10_12BIT:
  						para->cs = COLORSPACE_YUV444;
  						break;
-@@ -718,6 +814,13 @@
- 				int cd = para->cd;
- 				switch (hdev->hdmi_current_tunnel_mode) {
- 					case RGB_8BIT:
-+#ifdef CONFIG_AMLOGIC_MEDIA_VIDEO_DV_INJECTION
-+						/* 12-bit components carry the DM bits. */
-+						if (dv_injection_force_422_12()) {
-+							para->cd = COLORDEPTH_36B;
-+							break;
-+						}
-+#endif
- 							para->cd = COLORDEPTH_24B;
- 						break;
- 					case RGB_10_12BIT:
-@@ -1860,7 +1963,7 @@
+@@ -1860,7 +1936,7 @@ void update_current_para(struct hdmitx_dev *hdev)
  struct vsif_debug_save vsif_debug_info;
  struct vsif_debug_save hsty_vsif_config_data[8];
  unsigned int hsty_vsif_config_loc, hsty_vsif_config_num;
@@ -3173,7 +3141,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  	enum mode_type tunnel_mode, struct dv_vsif_para *data, bool signal_sdr)
  {
  	struct hdmitx_dev *hdev = &hdmitx_device;
-@@ -1874,12 +1977,9 @@
+@@ -1874,12 +1950,9 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	static enum eotf_type ltype = EOTF_T_NULL;
  	static uint8_t ltmode = -1;
  	enum hdmi_tf_type hdr_type = HDMI_NONE;
@@ -3186,7 +3154,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  	if (data == NULL)
-@@ -1904,7 +2004,6 @@
+@@ -1904,7 +1977,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	if (hdev->ready == 0) {
  		ltype = EOTF_T_NULL;
  		ltmode = -1;
@@ -3194,7 +3162,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  	if (hdev->rxcap.dv_info.ieeeoui != DV_IEEE_OUI) {
-@@ -1913,7 +2012,6 @@
+@@ -1913,7 +1985,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	}
  	if ((hdev->chip_type) < MESON_CPU_ID_GXL) {
  		pr_info("hdmitx: not support DolbyVision\n");
@@ -3202,7 +3170,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  		return;
  	}
  
-@@ -1984,7 +2082,6 @@
+@@ -1984,7 +2055,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB1, VEN_HB);
@@ -3210,7 +3178,7 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  			return;
  		}
  		if (type == EOTF_T_DOLBYVISION) {
-@@ -2102,7 +2199,6 @@
+@@ -2102,7 +2172,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB2, VEN_HB);
@@ -3218,13 +3186,13 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
  			return;
  		}
  		/*Dolby Vision standard case*/
-@@ -2200,8 +2296,37 @@
+@@ -2200,9 +2269,38 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  			}
  		}
  	}
 -	spin_unlock_irqrestore(&hdev->edid_spinlock, flags);
-+}
-+
+ }
+ 
 +/* R7: the lock-free body is shared by the original void API and the new
 + * checked entry, so readiness and acceptance are decided under one lock.
 + */
@@ -3252,17 +3220,18 @@ diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drive
 +	__hdmitx_set_vsif_pkt_locked(type, tunnel_mode, data, signal_sdr);
 +	spin_unlock_irqrestore(&hdmitx_device.edid_spinlock, flags);
 +	return 0;
- }
++}
 +EXPORT_SYMBOL(hdmitx_set_vsif_pkt_checked);
- 
++
  struct hdr10plus_para hdr10p_config_data;
  struct hdr10plus_para hsty_hdr10p_config_data[8];
+ unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 0000000000..dddd4eee4ddd
+index 0000000..10e8c12
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,32 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection
 + *
@@ -3282,7 +3251,6 @@ index 0000000000..dddd4eee4ddd
 +void dv_injection_process_frame(struct vframe_s *vf);
 +bool dv_injection_render_frame(struct vframe_s *vf);
 +bool dv_injection_block_hdr10(void);
-+bool dv_injection_force_422_12(void);
 +void dv_injection_new_stream(void);
 +void dv_injection_stream_started(void);
 +/* cache reset / light unregister: provider is still registered */

@@ -168,24 +168,25 @@ static void canvas_read(unsigned int idx, struct canvas_s *cs)
 	cs->height = fb0.var.yres_virtual;
 }
 static int prepare_result = 0, transport_ok = 1, prepare_calls = 0;
-static int force422_during_prepare = -1;
-static bool dv_injection_force_422_12(void);
+/* Whether the injection still had its transport request set while the driver
+ * was asked to prepare or restore the output.  The picture path itself must
+ * never be reprogrammed, so the request has to be cleared for a restore.
+ */
+static int transport_requested_during_prepare = -1;
+/* The driver may still notify while the output is being prepared (a mode
+ * change or an HPD event can land inside the call).
+ */
+static int prepare_notifies = 0;
 static void dv_injection_notify_output_lost(void);
 static int hdmitx_prepare_output_for_injection(void)
 {
 	prepare_calls++;
-	/* What the driver would ask while programming: the transport must not be
-	 * requested during a restore.
-	 */
-	force422_during_prepare = dv_injection_force_422_12();
-	/* The real helper clears hdev->ready inside this call, which notifies the
-	 * module exactly like an HPD would.  Reproduce it so the tests cannot
-	 * silently pass without the notification.
-	 */
-	dv_injection_notify_output_lost();
+	transport_requested_during_prepare = dv_inj_transport_requested ? 1 : 0;
+	if (prepare_notifies)
+		dv_injection_notify_output_lost();
 	return prepare_result;
 }
-static bool hdmitx_transport_is_422_12(void) { return transport_ok; }
+static bool hdmitx_transport_is_live(void) { return transport_ok; }
 static unsigned long msecs_to_jiffies(unsigned long ms) { return ms; }
 static void usleep_range(unsigned long a, unsigned long b) { (void)a; (void)b; }
 static bool dv_inj_change_in_progress, dv_inj_in_prepare;
@@ -393,6 +394,21 @@ static void test_state_machine(void) {
     assert(dv_injection_enable && dv_inj_state==DV_INJ_READY);
     assert(dv_inj_accepting && dv_inj_rt.ready && dv_inj_transport_ready);
 
+    /* The driver may notify while the output is prepared (a mode change or an
+     * HPD event can land inside the call).  The preparation must still
+     * converge and publish - the notification only advances the generation.
+     */
+    reset();
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE;
+    dv_inj_pending=false; dv_inj_accepting=false; dv_inj_transport_ready=false;
+    dv_inj_rt.ready=false; dv_injection_active=false; dv_inj_user_wants=false;
+    resolve_result=0; prepare_result=0; transport_ok=1; prepare_calls=0;
+    prepare_notifies=1;
+    assert(!dv_injection_enable_set("1",&kp));
+    prepare_notifies=0;
+    assert(dv_injection_enable && dv_inj_state==DV_INJ_READY);
+    assert(dv_inj_accepting && dv_inj_rt.ready && dv_inj_transport_ready);
+
     /* A closing transaction owns the output: enabling during it is refused. */
     dv_injection_begin_close(true,true);
     assert(!dv_injection_enable && dv_inj_state==DV_INJ_CLOSING && dv_inj_pending);
@@ -448,7 +464,7 @@ static void test_state_machine(void) {
         dv_inj_transport_requested = true; dv_injection_active = false;
         dv_injection_begin_close(true, true);
         assert(!dv_inj_transport_requested);
-        assert(!dv_injection_force_422_12());
+        assert(!dv_inj_transport_requested);
         (void)f;
     }
 
@@ -547,10 +563,10 @@ static void test_state_machine(void) {
     dv_injection_new_stream();                        /* UNREG while closing */
     assert(dv_inj_pending);
     assert(dv_inj_pending_restore);                   /* obligation merged, not dropped */
-    prepare_calls = 0; force422_during_prepare = -1;
+    prepare_calls = 0; transport_requested_during_prepare = -1;
     dv_inj_watchdog_fn(NULL);
     assert(prepare_calls >= 1);                       /* restore really ran */
-    assert(force422_during_prepare == 0);             /* without the 422 request */
+    assert(transport_requested_during_prepare == 0);      /* without the transport request */
     assert(!dv_inj_pending && dv_inj_state==DV_INJ_IDLE);
 
     /* disable -> RESET -> worker behaves the same way. */
@@ -563,10 +579,10 @@ static void test_state_machine(void) {
     assert(dv_inj_pending_restore);
     dv_injection_reset_stream();                      /* RESET while closing */
     assert(dv_inj_pending && dv_inj_pending_restore);
-    prepare_calls = 0; force422_during_prepare = -1;
+    prepare_calls = 0; transport_requested_during_prepare = -1;
     dv_inj_watchdog_fn(NULL);
     assert(prepare_calls >= 1);
-    assert(force422_during_prepare == 0);
+    assert(transport_requested_during_prepare == 0);
 
     /* A failing restore keeps the obligation even if a stop arrives. */
     reset(); kp.arg = &dv_injection_enable;
@@ -755,7 +771,7 @@ class KernelInjectionTests(unittest.TestCase):
                  "dv_injection_render_slot", "dv_injection_enable_set",
                  "should_block_vsif", "dv_injection_block_hdr10",
                  "dv_injection_render_frame",
-                 "dv_injection_force_422_12", "dv_injection_notify_output_lost",
+                 "dv_injection_notify_output_lost",
                  "dv_injection_crc32", "dv_injection_pkt_type",
                  "dv_injection_pack_bytes", "dv_injection_expand_pixels")
         # Locate the definition, not the forward declaration.
