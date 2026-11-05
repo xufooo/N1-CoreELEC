@@ -176,10 +176,10 @@ index 942f176..05d1d93 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 0000000..507b3e5
+index 0000000..2cbee25
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,2743 @@
+@@ -0,0 +1,2761 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -1099,6 +1099,19 @@ index 0000000..507b3e5
 +				      struct dv_vsif_para *data, bool signal_sdr);
 +extern int hdmitx_prepare_output_for_injection(void);
 +extern bool hdmitx_transport_is_live(void);
++extern void hdmitx_set_dv_injection_transport(bool enable);
++extern void hdmitx_reconfigure_video_format(void);
++
++/*
++ * The transport request is mirrored into the HDMI driver: it decides whether
++ * the output is programmed as RGB - which the metadata injection needs - or
++ * stays at the format the EDID and the source ask for.
++ */
++static void dv_inj_set_transport_requested(bool on)
++{
++	WRITE_ONCE(dv_inj_transport_requested, on);
++	hdmitx_set_dv_injection_transport(on);
++}
 +
 +static int dv_injection_send_vsif(const struct vinfo_s *vinfo)
 +{
@@ -1551,7 +1564,7 @@ index 0000000..507b3e5
 +	 * is never reprogrammed - see hdmitx_prepare_output_for_injection().
 +	 */
 +	spin_lock_irqsave(&dv_inj_publish_lock, flags);
-+	WRITE_ONCE(dv_inj_transport_requested, true);
++	dv_inj_set_transport_requested(true);
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +	ret = hdmitx_prepare_output_for_injection();
 +	if (ret || !hdmitx_transport_is_live()) {
@@ -1603,7 +1616,7 @@ index 0000000..507b3e5
 +	WRITE_ONCE(dv_inj_rt.ready, false);
 +	WRITE_ONCE(dv_inj_accepting, false);
 +	WRITE_ONCE(dv_inj_transport_ready, false);
-+	WRITE_ONCE(dv_inj_transport_requested, false);
++	dv_inj_set_transport_requested(false);
 +	*(bool *)&dv_injection_enable = false;
 +	WRITE_ONCE(dv_inj_state, DV_INJ_CLOSING);
 +	spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
@@ -1664,7 +1677,7 @@ index 0000000..507b3e5
 +		gen = READ_ONCE(dv_inj_session);
 +	}
 +	*(bool *)&dv_injection_enable = false;
-+	WRITE_ONCE(dv_inj_transport_requested, false);
++	dv_inj_set_transport_requested(false);
 +	WRITE_ONCE(dv_inj_transport_ready, false);
 +	WRITE_ONCE(dv_inj_accepting, false);
 +	WRITE_ONCE(dv_inj_rt.ready, false);
@@ -1721,6 +1734,11 @@ index 0000000..507b3e5
 +			spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +			if (READ_ONCE(dv_inj_pending_restore))
 +				ret = hdmitx_prepare_output_for_injection();
++			else
++				/* The transport request is gone: put the output back
++				 * to the format the EDID asks for.
++				 */
++				hdmitx_reconfigure_video_format();
 +			if (ret) {
 +				dv_injection_log(0,
 +						 "dv injection: closing restore failed (%d), retrying\n",
@@ -1755,7 +1773,7 @@ index 0000000..507b3e5
 +	    !READ_ONCE(dv_inj_pending)) {
 +		if (!READ_ONCE(dv_inj_user_wants)) {
 +			spin_lock_irqsave(&dv_inj_publish_lock, flags);
-+			WRITE_ONCE(dv_inj_transport_requested, false);
++			dv_inj_set_transport_requested(false);
 +			WRITE_ONCE(dv_inj_state, DV_INJ_IDLE);
 +			spin_unlock_irqrestore(&dv_inj_publish_lock, flags);
 +		} else {
@@ -3009,7 +3027,7 @@ index a93fd94..185371f 100644
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
-index 933287c..a3535bb 100644
+index 933287c..5b1b666 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 @@ -49,6 +49,9 @@
@@ -3035,7 +3053,17 @@ index 933287c..a3535bb 100644
  void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type
  	tunnel_mode, struct dv_vsif_para *data, bool switch_to_sdr);
  static void hdmitx_set_hdr10plus_pkt(unsigned int flag,
-@@ -103,6 +110,61 @@ static struct hdmitx_dev hdmitx_device = {
+@@ -94,6 +101,9 @@ static void edidinfo_detach_to_vinfo(struct hdmitx_dev *hdev);
+ static bool is_cur_tmds_div40(struct hdmitx_dev *hdev);
+ static void hdmitx_resend_div40(struct hdmitx_dev *hdev);
+ static unsigned int hdmitx_get_frame_duration(void);
++extern void hdmitx_reconfigure_video_format(void);
++extern void hdmitx_reconfigure_video_format_hw(void);
++extern bool hdmitx_transport_is_rgb444_8bit(void);
+ 
+ static DEFINE_MUTEX(setclk_mutex);
+ static DEFINE_MUTEX(getedid_mutex);
+@@ -103,6 +113,73 @@ static struct hdmitx_dev hdmitx_device = {
  	.cec_func_config = 0x7f
  };
  
@@ -3061,34 +3089,46 @@ index 933287c..a3535bb 100644
 +/*
 + * The metadata injection rides on the picture that is already on screen: the
 + * VSIF is handed over per frame and the metadata bits are written into the
-+ * OSD canvas.  It must NOT reprogram the picture path.
++ * OSD canvas.  The picture path itself is never reprogrammed.
 + *
 + * Re-running the mode selection (set_disp_mode_auto()) desynchronises the
 + * vout side - the framebuffer keeps its own timing and the HDMI side picks a
-+ * different VIC - and the TV then shows "no signal".  Forcing a colour space
-+ * or a colour depth has the same effect: para points into the static
-+ * all_fmt_paras[] table, so the change would also corrupt every later mode
-+ * set.  The reference implementation does neither: it only writes the
-+ * metadata into the canvas and sends the VSIF.
++ * different VIC - and the TV then shows "no signal".
 + *
-+ * So the only thing this function may do is confirm that the output is live,
-+ * i.e. a mode is programmed and a VSIF will actually be handed over.
++ * What the injection does need is the RGB 8 bit transport: the tunnel mode
++ * the TV is told about (DV_RGB_444_8BIT) only works when the samples on the
++ * wire are RGB, and only the HDMI block can turn the YUV444 samples of the
++ * video path into RGB.  So the video format of the HDMI output is
++ * reprogrammed - and only that: no VIC, no PLL, no encoder.
 + */
++/* The mode set runs under setclk_mutex, so the injection must not reprogram
++ * the output format while a mode change is in flight.
++ */
++void hdmitx_reconfigure_video_format(void)
++{
++	mutex_lock(&setclk_mutex);
++	hdmitx_reconfigure_video_format_hw();
++	mutex_unlock(&setclk_mutex);
++}
++EXPORT_SYMBOL(hdmitx_reconfigure_video_format);
++
 +int hdmitx_prepare_output_for_injection(void)
 +{
 +	if (!hdmitx_vsif_tx_ready())
 +		return -EAGAIN;
++	hdmitx_reconfigure_video_format();
 +	return 0;
 +}
 +EXPORT_SYMBOL(hdmitx_prepare_output_for_injection);
 +
 +
-+/* The transport the injection relies on: a live output.  The colour space
-+ * and the colour depth stay exactly as the EDID and the source ask for.
++/* The transport the injection relies on: a live output that really carries
++ * RGB 8 bit samples, so the metadata bits in the least significant bits
++ * reach the TV unchanged.
 + */
 +bool hdmitx_transport_is_live(void)
 +{
-+	return hdmitx_vsif_tx_ready();
++	return hdmitx_vsif_tx_ready() && hdmitx_transport_is_rgb444_8bit();
 +}
 +EXPORT_SYMBOL(hdmitx_transport_is_live);
 +
@@ -3097,7 +3137,7 @@ index 933287c..a3535bb 100644
  static const struct dv_info dv_dummy;
  static int log_level;
  static bool dovi_tv_led_bt2020 = false;
-@@ -374,6 +436,12 @@ static int hdmitx_reboot_notifier(struct notifier_block *nb,
+@@ -374,6 +451,12 @@ static int hdmitx_reboot_notifier(struct notifier_block *nb,
  		hdev->debug_param.avmute_frame * hdmitx_get_frame_duration();
  
  	hdev->ready = 0;
@@ -3110,7 +3150,7 @@ index 933287c..a3535bb 100644
  	hdev->hwop.cntlmisc(hdev, MISC_AVMUTE_OP, SET_AVMUTE);
  	if (hdev->debug_param.avmute_frame > 0)
  		msleep(mute_us / 1000);
-@@ -615,6 +683,12 @@ static int set_disp_mode_auto(void)
+@@ -615,6 +698,12 @@ static int set_disp_mode_auto(void)
  
  	memset(mode, 0, sizeof(mode));
  	hdev->ready = 0;
@@ -3123,7 +3163,7 @@ index 933287c..a3535bb 100644
  
  	/* get current vinfo */
  	info = hdmitx_get_current_vinfo();
-@@ -686,6 +760,8 @@ static int set_disp_mode_auto(void)
+@@ -686,6 +775,8 @@ static int set_disp_mode_auto(void)
  				int cs = para->cs;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
@@ -3132,7 +3172,7 @@ index 933287c..a3535bb 100644
  					case RGB_10_12BIT:
  						para->cs = COLORSPACE_YUV444;
  						break;
-@@ -1860,7 +1936,7 @@ void update_current_para(struct hdmitx_dev *hdev)
+@@ -1860,7 +1951,7 @@ void update_current_para(struct hdmitx_dev *hdev)
  struct vsif_debug_save vsif_debug_info;
  struct vsif_debug_save hsty_vsif_config_data[8];
  unsigned int hsty_vsif_config_loc, hsty_vsif_config_num;
@@ -3141,7 +3181,7 @@ index 933287c..a3535bb 100644
  	enum mode_type tunnel_mode, struct dv_vsif_para *data, bool signal_sdr)
  {
  	struct hdmitx_dev *hdev = &hdmitx_device;
-@@ -1874,12 +1950,9 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -1874,12 +1965,9 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	static enum eotf_type ltype = EOTF_T_NULL;
  	static uint8_t ltmode = -1;
  	enum hdmi_tf_type hdr_type = HDMI_NONE;
@@ -3154,7 +3194,7 @@ index 933287c..a3535bb 100644
  		return;
  	}
  	if (data == NULL)
-@@ -1904,7 +1977,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -1904,7 +1992,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	if (hdev->ready == 0) {
  		ltype = EOTF_T_NULL;
  		ltmode = -1;
@@ -3162,7 +3202,7 @@ index 933287c..a3535bb 100644
  		return;
  	}
  	if (hdev->rxcap.dv_info.ieeeoui != DV_IEEE_OUI) {
-@@ -1913,7 +1985,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -1913,7 +2000,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	}
  	if ((hdev->chip_type) < MESON_CPU_ID_GXL) {
  		pr_info("hdmitx: not support DolbyVision\n");
@@ -3170,7 +3210,7 @@ index 933287c..a3535bb 100644
  		return;
  	}
  
-@@ -1984,7 +2055,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -1984,7 +2070,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB1, VEN_HB);
@@ -3178,7 +3218,7 @@ index 933287c..a3535bb 100644
  			return;
  		}
  		if (type == EOTF_T_DOLBYVISION) {
-@@ -2102,7 +2172,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -2102,7 +2187,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB2, VEN_HB);
@@ -3186,7 +3226,7 @@ index 933287c..a3535bb 100644
  			return;
  		}
  		/*Dolby Vision standard case*/
-@@ -2200,9 +2269,38 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -2200,9 +2284,38 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  			}
  		}
  	}
@@ -3226,6 +3266,112 @@ index 933287c..a3535bb 100644
  struct hdr10plus_para hdr10p_config_data;
  struct hdr10plus_para hsty_hdr10p_config_data[8];
  unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
+diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
+index ff4ad3e..7851c13 100644
+--- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
++++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
+@@ -35,6 +35,7 @@
+ #include <linux/clk.h>
+ #include <linux/amlogic/media/vout/vinfo.h>
+ #include <linux/amlogic/media/vout/hdmi_tx/enc_clk_config.h>
++#include <linux/export.h>
+ #include <linux/amlogic/media/vout/hdmi_tx/hdmi_info_global.h>
+ #include <linux/amlogic/media/vout/hdmi_tx/hdmi_tx_module.h>
+ #include <linux/amlogic/media/vout/hdmi_tx/hdmi_tx_ddc.h>
+@@ -5461,10 +5462,40 @@ static void hdmitx_csc_config(unsigned char input_color_format,
+ 		(rgb_ycc_indicator & 0x3), 0, 2);
+ }   /* hdmitx_csc_config */
+ 
++/*
++ * Dolby Vision metadata injection.
++ *
++ * The metadata travels in the least significant bit of the transmitted
++ * samples and the tunnel mode the TV is told about (DV_RGB_444_8BIT) only
++ * works when the samples on the wire really are RGB.  The video path of this
++ * SoC can only deliver YUV444, but the HDMI block converts YUV to RGB on its
++ * own, so the injection asks for an RGB 8 bit output format.  Only the HDMI
++ * output changes: the video path and the mode timing stay untouched.
++ */
++static bool hdmitx_dv_injection_rgb_transport;
++static enum hdmi_color_space hdmitx_prog_cs = COLORSPACE_YUV444;
++static enum hdmi_color_depth hdmitx_prog_cd = COLORDEPTH_24B;
++
++void hdmitx_set_dv_injection_transport(bool enable)
++{
++	hdmitx_dv_injection_rgb_transport = enable;
++}
++EXPORT_SYMBOL(hdmitx_set_dv_injection_transport);
++
++/* True when the HDMI output really carries RGB 8 bit samples. */
++bool hdmitx_transport_is_rgb444_8bit(void)
++{
++	return hdmitx_prog_cs == COLORSPACE_RGB444 &&
++		hdmitx_prog_cd == COLORDEPTH_24B;
++}
++EXPORT_SYMBOL(hdmitx_transport_is_rgb444_8bit);
++
+ static void hdmitx_set_hw(struct hdmitx_dev *hdev)
+ {
+ 	enum hdmi_vic vic = HDMI_Unknown;
+ 	struct hdmi_format_para *para = NULL;
++	enum hdmi_color_space cs;
++	enum hdmi_color_depth cd;
+ 
+ 	if (hdev->cur_video_param == NULL) {
+ 		pr_info("error at null vidpara!\n");
+@@ -5478,11 +5509,48 @@ static void hdmitx_set_hw(struct hdmitx_dev *hdev)
+ 		return;
+ 	}
+ 
+-	pr_info(HW " config hdmitx IP vic = %d cd:%d cs: %d\n", vic,
+-		hdev->para->cd, hdev->para->cs);
++	cs = hdev->para->cs;
++	cd = hdev->para->cd;
++	if (hdmitx_dv_injection_rgb_transport) {
++		/* RGB 8 bit: the tunnel mode the TV advertises for Dolby Vision
++		 * (DV_RGB_444_8BIT) needs RGB samples on the wire.
++		 */
++		cs = COLORSPACE_RGB444;
++		cd = COLORDEPTH_24B;
++	}
++	hdmitx_prog_cs = cs;
++	hdmitx_prog_cd = cd;
++
++	pr_info(HW " config hdmitx IP vic = %d cd:%d cs: %d\n", vic, cd, cs);
+ 
+ 	config_hdmi20_tx(vic, hdev,
+-			hdev->para->cd,
++			cd,
+ 			TX_INPUT_COLOR_FORMAT,
+-			hdev->para->cs);
++			cs);
++
++	/* The DWC HDMI transmitter only puts RGB on the wire in DVI mode.  The
++	 * vendor's own RGB output path (hdmitx_hdmi_dvi_config) does exactly
++	 * the same: the colour space converter turns the YUV444 samples of the
++	 * video path into RGB444 and the DVI flag tells the transmitter that
++	 * the samples are RGB now.
++	 */
++	hdmitx_set_reg_bits(HDMITX_DWC_FC_INVIDCONF,
++			(cs == COLORSPACE_RGB444) ? 0 : 1, 3, 1);
++}
++
++/*
++ * Re-program the HDMI video format (colour space, colour depth and the AVI
++ * colour indicator) without touching the mode timing.  The metadata injection
++ * switches the output to RGB while a video is already running, so the full
++ * mode set (hdmitx_set_dispmode) must not be used: it would reset the
++ * encoder and the PLL and the TV would lose the picture.
++ */
++void hdmitx_reconfigure_video_format_hw(void)
++{
++	struct hdmitx_dev *hdev = get_hdmitx_device();
++
++	if (hdev == NULL)
++		return;
++	hdmitx_set_hw(hdev);
+ }
++EXPORT_SYMBOL(hdmitx_reconfigure_video_format_hw);
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
 index 0000000..10e8c12

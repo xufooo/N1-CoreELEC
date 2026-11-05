@@ -177,16 +177,35 @@ static int transport_requested_during_prepare = -1;
  * change or an HPD event can land inside the call).
  */
 static int prepare_notifies = 0;
+/* The HDMI side of the transport contract: the injection asks for an RGB
+ * 8bit transport and the driver only reports a live transport once the
+ * output is really programmed that way.
+ */
+static bool hdmitx_rgb_transport_active;
+static bool hdmitx_prog_rgb;
 static void dv_injection_notify_output_lost(void);
+static void hdmitx_set_dv_injection_transport(bool enable)
+{
+	hdmitx_rgb_transport_active = enable;
+}
+static void hdmitx_reconfigure_video_format(void)
+{
+	hdmitx_prog_rgb = hdmitx_rgb_transport_active;
+}
 static int hdmitx_prepare_output_for_injection(void)
 {
 	prepare_calls++;
 	transport_requested_during_prepare = dv_inj_transport_requested ? 1 : 0;
 	if (prepare_notifies)
 		dv_injection_notify_output_lost();
+	if (!prepare_result)
+		hdmitx_reconfigure_video_format();
 	return prepare_result;
 }
-static bool hdmitx_transport_is_live(void) { return transport_ok; }
+static bool hdmitx_transport_is_live(void)
+{
+	return transport_ok && hdmitx_prog_rgb;
+}
 static unsigned long msecs_to_jiffies(unsigned long ms) { return ms; }
 static void usleep_range(unsigned long a, unsigned long b) { (void)a; (void)b; }
 static bool dv_inj_change_in_progress, dv_inj_in_prepare;
@@ -313,6 +332,7 @@ static void reset(void) {
     dv_inj_change_in_progress=false; dv_inj_canvas_committed=false;
     dv_injection_enable=true; dv_injection_active=false;
     dv_inj_stream_running=true; dv_inj_transport_requested=true;
+    hdmitx_rgb_transport_active=true; hdmitx_prog_rgb=true;
     dv_inj_transport_ready=true; dv_inj_mode_generation=0;
     dv_inj_accepting=true; dv_inj_state=DV_INJ_READY;
     dm_metadata_size=181; dv_injection_path=0;
@@ -377,6 +397,51 @@ static void test_lifecycle(void) {
     assert(!dv_injection_enable_set("0",&kp));
     assert(!dv_injection_block_hdr10() && !dv_inj_rt.ready);
     assert(!dv_injection_render_slot(&slot));
+}
+
+static void test_transport(void) {
+    struct kernel_param kp={0};
+    kp.arg = &dv_injection_enable;
+
+    /* A cold enable programs the output as RGB 8bit: the metadata bits have
+     * to survive in all three channels, so the physical format has to be
+     * RGB444 and not the YUV444 the EDID asks for. */
+    reset();
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE;
+    dv_inj_pending=false; dv_inj_accepting=false; dv_inj_transport_ready=false;
+    dv_inj_rt.ready=false; dv_injection_active=false; dv_inj_user_wants=false;
+    hdmitx_rgb_transport_active=false; hdmitx_prog_rgb=false;
+    resolve_result=0; prepare_result=0; transport_ok=1; prepare_calls=0;
+    assert(!dv_injection_enable_set("1",&kp));
+    assert(dv_injection_enable && dv_inj_state==DV_INJ_READY);
+    assert(hdmitx_rgb_transport_active);   /* the driver was asked for RGB */
+    assert(hdmitx_prog_rgb);                /* and the output really is RGB */
+
+    /* A transport that is not live must not publish: the preparation has to
+     * fail instead of running with a broken output. */
+    reset();
+    dv_injection_enable=false; dv_inj_state=DV_INJ_IDLE;
+    dv_inj_pending=false; dv_inj_accepting=false; dv_inj_transport_ready=false;
+    dv_inj_rt.ready=false; dv_injection_active=false; dv_inj_user_wants=false;
+    hdmitx_rgb_transport_active=false; hdmitx_prog_rgb=false;
+    resolve_result=0; prepare_result=0; transport_ok=0; prepare_calls=0;
+    assert(dv_injection_enable_set("1",&kp) != 0);
+    assert(!dv_injection_enable);
+    assert(dv_inj_state != DV_INJ_READY);
+
+    /* Closing gives the output back to the format the EDID asks for: the
+     * request is dropped and the format is reprogrammed. */
+    reset();
+    dv_inj_state=DV_INJ_READY; dv_injection_enable=true;
+    dv_inj_user_wants=false;          /* the user turned the injection off */
+    dv_inj_transport_requested=true; hdmitx_rgb_transport_active=true;
+    hdmitx_prog_rgb=true; dv_injection_active=false;
+    dv_injection_begin_close(true,true);
+    assert(!dv_inj_transport_requested);
+    assert(!hdmitx_rgb_transport_active);   /* the driver was told to stop */
+    prepare_result=0; transport_ok=1;
+    dv_inj_watchdog_fn(NULL);
+    assert(!hdmitx_prog_rgb);               /* and the output was reprogrammed */
 }
 
 static void test_state_machine(void) {
@@ -745,6 +810,7 @@ int main(int argc,char **argv) {
     else if(!strcmp(argv[1],"layout")) test_layout();
     else if(!strcmp(argv[1],"lifecycle")) test_lifecycle();
     else if(!strcmp(argv[1],"state")) test_state_machine();
+    else if(!strcmp(argv[1],"transport")) test_transport();
     else if(!strcmp(argv[1],"packets")) test_packets();
     else return 2;
     return 0;
@@ -764,7 +830,9 @@ class KernelInjectionTests(unittest.TestCase):
         names = ("dv_injection_block_length", "dv_injection_validate_metadata",
                  "dv_injection_canvas_layout", "dv_injection_deactivate",
                  "dv_injection_publish_candidate", "dv_injection_note_canvas_change",
-                 "dv_injection_note_canvas_committed", "dv_injection_new_stream",
+                 "dv_injection_note_canvas_committed",
+                 "dv_inj_set_transport_requested",
+                 "dv_injection_new_stream",
                  "dv_injection_stream_started", "dv_injection_reset_stream",
                  "dv_injection_begin_close", "dv_injection_begin_close_locked",
                  "dv_inj_prepare_locked", "dv_inj_watchdog_fn",
@@ -797,6 +865,9 @@ class KernelInjectionTests(unittest.TestCase):
 
     def test_state_machine(self):
         subprocess.run([str(self.binary),"state"],check=True)
+
+    def test_transport_contract(self):
+        subprocess.run([str(self.binary),"transport"],check=True)
 
     def test_packetizer_matches_reference(self):
         subprocess.run([str(self.binary),"packets"],check=True)
