@@ -4,6 +4,15 @@ Subject: [PATCH] arm64: dts: add Phicomm N1 to the NG DTB build
 Adapted from RuralHunter via Damenly commit 53b9f488a97ecb5b4c5c9c80234d1499d41ccce4.
 Keep the 21.3 kernel, register the DTB in its normal dtbs target.
 
+The N1 carries an external RTL8211F (0x001cc916) in RGMII mode.  The 21.3
+GXL device trees describe the port generically: no phy-mode (so the PHY
+interface stays PHY_INTERFACE_MODE_NA) and cali_val = <0x20000>, which the
+21.3 stmmac glue writes into PRG_ETH_REG1 ("set PRG_ETH_REG1 for exphy
+delay").  CoreELEC 9.2.2 never wrote that register (the writel() was
+commented out) and RuralHunter's N1 dts carried no cali_val, so the
+overwritten RGMII timing made the link fall back to 10baseT.  Restore the
+configuration the board was validated with.
+
 --- a/arch/arm64/boot/dts/amlogic/Makefile
 +++ b/arch/arm64/boot/dts/amlogic/Makefile
 @@ -70,6 +70,7 @@
@@ -16,7 +25,9 @@ Keep the 21.3 kernel, register the DTB in its normal dtbs target.
  dtb-$(CONFIG_ARM64) += coreelec-gxl/gxl_p230_k2_pro_100mbit.dtb
 --- /dev/null
 +++ b/arch/arm64/boot/dts/amlogic/coreelec-gxl/meson_gxl_s905d_phicomm_n1.dts
-@@ -0,0 +1,20 @@
+--- /dev/null
++++ b/arch/arm64/boot/dts/amlogic/coreelec-gxl/meson_gxl_s905d_phicomm_n1.dts
+@@ -0,0 +1,41 @@
 +// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
 +/* Copyright (c) 2019 Rural Hunter
 + * Ported from Damenly/CoreELEC 53b9f488a97ecb5b4c5c9c80234d1499d41ccce4.
@@ -36,4 +47,25 @@ Keep the 21.3 kernel, register the DTB in its normal dtbs target.
 +    dwc2_a {
 +        controller-type = <1>; /* host */
 +    };
++};
++
++/*
++ * The N1 carries an external Realtek RTL8211F (0x001cc916) in RGMII mode.
++ *
++ * The generic 21.3 GXL device trees describe the ethernet port in a way the
++ * N1 never had:
++ *   - no phy-mode, so the PHY interface stays PHY_INTERFACE_MODE_NA and the
++ *     RGMII delay handling of the phy driver is not configured at all,
++ *   - cali_val = <0x20000>, which the 21.3 stmmac glue writes into
++ *     PRG_ETH_REG1 ("set PRG_ETH_REG1 for exphy delay").  CoreELEC 9.2.2 -
++ *     the tree the N1 community used before - never wrote that register
++ *     (the writel() was commented out) and RuralHunter's N1 dts did not
++ *     carry cali_val either.
++ * With that register overwritten the RGMII timing is off and the link falls
++ * back to 10baseT, so restore the configuration the board was validated with.
++ */
++&ethmac {
++    phy-mode = "rgmii";
++    max-speed = <1000>;
++    /delete-property/ cali_val;
 +};
