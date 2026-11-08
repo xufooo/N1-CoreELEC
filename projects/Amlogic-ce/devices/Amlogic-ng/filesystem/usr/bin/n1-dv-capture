@@ -1,0 +1,138 @@
+#!/bin/sh
+#
+# Collect a Dolby Vision injection trace from this box into one tarball.
+#
+# Run it on the box (or over the network by whoever maintains the box) *after*
+# playback showed the problem.  It only reads state: no setting, no HDMI mode
+# and no playback is changed, nothing is uploaded, and the archive stays in
+# /storage until someone copies it away.
+#
+# What it contains: kernel build id, the injection module parameters, the
+# /proc/dv_injection_trace ring, the HDMI side's own mode/format report, the
+# relevant kernel log lines and the relevant Kodi log lines with media URLs and
+# addresses masked.  It contains no credentials and no user configuration.
+
+set -u
+
+OUT_ROOT=${OUT_ROOT:-/storage}
+STAMP=$(date +%Y%m%d-%H%M%S)
+DIR="$OUT_ROOT/n1-dv-diag-$STAMP"
+PARAMS=/sys/module/amvideo/parameters
+TRACE=/proc/dv_injection_trace
+
+mkdir -p "$DIR" || exit 1
+
+note() { printf '%s\n' "$*" >>"$DIR/notes.txt"; }
+
+# ---------------------------------------------------------------- build + why
+{
+	echo "collected: $STAMP"
+	echo "kernel: $(uname -srmo 2>/dev/null || uname -a)"
+	echo "release: $(head -n 1 /etc/release 2>/dev/null)"
+	echo "boot: $(cut -d' ' -f1 /proc/uptime 2>/dev/null) s ago"
+} >"$DIR/build.txt"
+
+# ------------------------------------------------------- injection parameters
+{
+	for p in "$PARAMS"/dv_* "$PARAMS"/vdr_dm_data_source \
+		 "$PARAMS"/osd_canvas "$PARAMS"/osd_pixel_offset \
+		 "$PARAMS"/bytes_per_pixel "$PARAMS"/packet_repeat \
+		 "$PARAMS"/always_send_vsif "$PARAMS"/inject_osd_metadata \
+		 "$PARAMS"/dv_vsif_send_in_hdmi_packet; do
+		[ -e "$p" ] || continue
+		echo "$(basename "$p")=$(cat "$p" 2>/dev/null)"
+	done
+} >"$DIR/parameters.txt" 2>&1
+
+if [ -r "$PARAMS/dv_injection_diag" ]; then
+	DIAG=$(cat "$PARAMS/dv_injection_diag" 2>/dev/null)
+	if [ "${DIAG:-0}" = "0" ]; then
+		note "dv_injection_diag was 0: the trace ring is empty."
+		note "To capture a run: echo 1 > $PARAMS/dv_injection_diag"
+		note "  then play the clip, replay the problem, and run this again."
+	fi
+else
+	note "the running kernel has no dv_injection_diag parameter:"
+	note "  this is not the diagnostic build, or the module did not load."
+fi
+
+# ------------------------------------------------------------------ the ring
+if [ -r "$TRACE" ]; then
+	tail -c 262144 "$TRACE" >"$DIR/trace.txt" 2>/dev/null ||
+		cat "$TRACE" >"$DIR/trace.txt" 2>/dev/null
+	note "trace.txt holds the newest 256 KiB of the ring."
+else
+	note "$TRACE is missing: the diagnostic build is not running."
+fi
+
+# --------------------------------------------------------------- HDMI/vout
+{
+	for f in disp_mode config hdr_cap dv_cap dv_vsif hdmi_attr; do
+		for p in "/sys/class/amhdmitx/amhdmitx0/$f" \
+			 "/sys/class/display/$f"; do
+			[ -r "$p" ] || continue
+			echo "== $p"
+			head -c 8192 "$p" 2>/dev/null
+			echo
+		done
+	done
+	if [ -r /proc/amhdmitx/amhdmitx0 ]; then
+		echo "== /proc/amhdmitx/amhdmitx0"
+		head -c 16384 /proc/amhdmitx/amhdmitx0 2>/dev/null
+	fi
+} >"$DIR/hdmi.txt" 2>&1
+note "hdmi.txt is the display's own capability/format report."
+
+# --------------------------------------------------------------- kernel log
+dmesg 2>/dev/null |
+	grep -iE 'dv injection|dolby|dovi|hdmitx|hdr|vout|osd' |
+	tail -n 600 >"$DIR/dmesg-dv.txt" 2>/dev/null
+dmesg 2>/dev/null | tail -n 200 >"$DIR/dmesg-tail.txt" 2>/dev/null
+
+# ------------------------------------------------------------------ Kodi log
+LOG=/storage/.kodi/temp/kodi.log
+if [ -r "$LOG" ]; then
+	grep -iE 'dovi|dolby|CAMLCodec|OnLostDisplay|OnResetDisplay|hdr|VideoPlayer' "$LOG" |
+		tail -n 400 |
+		sed -e 's#[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*#<address>#g' \
+		    -e 's#smb://[^ ",]*#<media-url>#g' \
+		    -e 's#nfs://[^ ",]*#<media-url>#g' \
+		    -e 's#/storage/[^ ",]*video[^ ",]*#<media-file>#g' \
+		>"$DIR/kodi-dv.txt" 2>/dev/null
+	note "kodi-dv.txt keeps codec/display lines only; media URLs and addresses are masked."
+else
+	note "no kodi.log found."
+fi
+
+cat >"$DIR/README.txt" <<'EOF'
+Dolby Vision injection diagnostic capture
+=========================================
+
+Files:
+  build.txt        kernel/build identity of the running system
+  parameters.txt   injection module parameters as they were when captured
+  trace.txt        the bounded /proc/dv_injection_trace ring (if the diagnostic
+                   kernel is running)
+  hdmi.txt         the display driver's own mode/format/capability report
+  dmesg-dv.txt     kernel log lines about DV/injection/HDMI/vout
+  dmesg-tail.txt   last 200 kernel log lines, for context
+  kodi-dv.txt      Kodi lines about the codec and display, media URLs masked
+  notes.txt        what was and was not available
+
+Reproducing a capture:
+  1. echo 1 > /sys/module/amvideo/parameters/dv_injection_diag
+     (arms a fresh trace; it records at most dv_injection_diag_frames frames
+      and dv_injection_diag_commits display commits, defaults 32/32)
+  2. play the clip and reproduce the problem
+  3. re-run this script and keep the newest n1-dv-diag-*.tar.gz
+
+The trace never prints per frame: read it with `cat /proc/dv_injection_trace`.
+Disable it again with `echo 0 > /sys/module/amvideo/parameters/dv_injection_diag`.
+EOF
+
+TAR="$OUT_ROOT/n1-dv-diag-$STAMP.tar.gz"
+tar czf "$TAR" -C "$OUT_ROOT" "n1-dv-diag-$STAMP" 2>/dev/null ||
+	tar cf - -C "$OUT_ROOT" "n1-dv-diag-$STAMP" | gzip -9 >"$TAR"
+
+echo "wrote $TAR"
+ls -l "$DIR"
