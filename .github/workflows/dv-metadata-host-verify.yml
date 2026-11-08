@@ -1,0 +1,165 @@
+name: DV metadata host verification
+
+# Host-only verification of the Dolby Vision metadata path used by the N1
+# TV-led injection patch. It builds the pinned doppingkoala/dovi_tool fork,
+# runs the real fork API (parse -> Kodi-equivalent convert -> write), compares
+# the produced DM against an independent Python rebuild, and pushes the real
+# DM through the kernel validate/packetizer/expand code extracted from the
+# repository patch, verified by an independent CRC/packet/pixel checker.
+#
+# Deliberately manual-only: pushing to any branch must not start firmware work.
+
+on:
+  workflow_dispatch:
+    inputs:
+      fixture_glob:
+        description: 'Comma separated fixture names (empty = all upstream fixtures)'
+        required: false
+        default: ''
+      strict_resolver:
+        description: 'fail instead of falling back when a dependency needs a newer rustc'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dv-metadata-host-verify-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FORK_REPO: doppingkoala/dovi_tool
+  FORK_SHA: d4ad4ba7e6f5acef6c7321dac0139992a082cd8f
+  FORK_TARBALL_SHA256: e75fa34dbb755902f867383e87c28df7062baaa61c780978daaf94ed868d3d60
+  FIXTURE_GLOB: ${{ inputs.fixture_glob }}
+  RUST_VERSION: 1.85.0
+
+jobs:
+  host-verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = "true"
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+          rustc -V
+          cargo -V
+
+      - name: Fetch pinned fork source
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/dvhost"
+          mkdir -p "$WORK"
+          URL="https://github.com/${FORK_REPO}/archive/${FORK_SHA}.tar.gz"
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 3 --retry-delay 2 -o "$WORK/fork.tar.gz" "$URL"; then break; fi
+            echo "download attempt $attempt failed"; sleep 5
+          done
+          echo "$FORK_TARBALL_SHA256  $WORK/fork.tar.gz" | sha256sum -c -
+          mkdir -p "$WORK/fork"
+          tar xzf "$WORK/fork.tar.gz" -C "$WORK/fork" --strip-components=1
+          test -f "$WORK/fork/dolby_vision/src/rpu/dovi_rpu.rs"
+          # The probe crate resolves the dependency through this stable name.
+          rm -rf "$WORK/fork/dovi_tool-src"
+          mv "$WORK/fork" "$WORK/dovi_tool-src"
+          cp -r tools/n1/dvhost/forkprobe "$WORK/probe"
+          sed -i "s#@FORK_DIR@#$WORK/dovi_tool-src#g" "$WORK/probe/Cargo.toml"
+          grep -n "path" "$WORK/probe/Cargo.toml"
+
+      - name: Build fork probe
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: ${{ inputs.strict_resolver && 'deny' || 'fallback' }}
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/dvhost"
+          cd "$WORK/probe"
+          cargo generate-lockfile
+          cargo build --release --locked 2>&1 | tee "$WORK/cargo-build.log"
+          cargo tree --locked > "$WORK/cargo-tree.txt" 2>&1 || true
+          cp Cargo.lock "$WORK/Cargo.lock"
+          test -x "target/release/dv_fork_probe"
+
+      - name: Run fork on pinned fixtures
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/dvhost"
+          OUT="$WORK/forkout"
+          mkdir -p "$OUT"
+          ASSETS="$WORK/dovi_tool-src/assets/tests"
+          "$WORK/probe/target/release/dv_fork_probe" \
+            --assets "$ASSETS" \
+            --out "$OUT" \
+            --select "${FIXTURE_GLOB}" | tee "$WORK/fork-run.log"
+          test -s "$WORK/fork-run.log"
+          python3 tools/n1/dvhost/check_fork_run.py --log "$WORK/fork-run.log" --out "$OUT"
+
+      - name: Kernel harness + independent verification
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/dvhost"
+          python3 tools/n1/dvhost/run_verify.py \
+            --patch projects/Amlogic-ce/devices/Amlogic-ng/patches/linux/linux-20-tv-led-dolby-vision-injection.patch \
+            --forkout "$WORK/forkout" \
+            --work "$WORK/kernel" \
+            --summary "$WORK/summary.json" \
+            --log "$WORK/verify.log"
+          cat "$WORK/verify.log"
+
+      - name: Step summary
+        if: always()
+        run: |
+          set -euo pipefail
+          WORK="$RUNNER_TEMP/dvhost"
+          {
+            echo "### DV metadata host verification"
+            echo
+            echo "- fork: \`${FORK_REPO}@${FORK_SHA}\`"
+            echo "- fork tarball sha256 verified: \`${FORK_TARBALL_SHA256}\`"
+            echo "- rust: \`${RUST_VERSION}\`"
+            if [ -f "$WORK/summary.json" ]; then
+              python3 - "$WORK/summary.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+print()
+print("| group | cases | pass | fail | expected-fail |")
+print("|---|---|---|---|---|")
+for g in s.get('groups', []):
+    print("| %s | %d | %d | %d | %d |" % (
+        g['name'], g['cases'], g['pass'], g['fail'], g.get('expected_fail', 0)))
+print()
+print("fixtures: %d, frames: %d, dm_bytes_compared: %d, verdict: **%s**" % (
+    s.get('fixtures', 0), s.get('frames', 0), s.get('dm_bytes_compared', 0), s.get('verdict')))
+print()
+for note in s.get('notes', []):
+    print("- " + note)
+PY
+            else
+              echo "no summary produced"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload host verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dv-metadata-host-verify-${{ github.run_id }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/dvhost/fork-run.log
+            ${{ runner.temp }}/dvhost/verify.log
+            ${{ runner.temp }}/dvhost/summary.json
+            ${{ runner.temp }}/dvhost/cargo-build.log
+            ${{ runner.temp }}/dvhost/cargo-tree.txt
+            ${{ runner.temp }}/dvhost/Cargo.lock
+            ${{ runner.temp }}/dvhost/forkout
+            ${{ runner.temp }}/dvhost/kernel

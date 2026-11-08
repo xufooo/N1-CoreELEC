@@ -1,0 +1,19 @@
+[package]
+name = "dv-fork-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Host probe: exercise the pinned dovi_tool fork exactly like the Kodi DM conversion patch does"
+
+# The workflow rewrites @FORK_DIR@ to the extracted fork checkout.
+[dependencies]
+dolby_vision = { path = "@FORK_DIR@/dolby_vision", features = ["serde"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "dv_fork_probe"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 2
+debug = false
