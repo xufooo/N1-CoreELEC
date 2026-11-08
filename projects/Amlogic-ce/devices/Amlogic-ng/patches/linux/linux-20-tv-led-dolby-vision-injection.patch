@@ -176,10 +176,10 @@ index 942f1761..05d1d938 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 00000000..424ef2e2
+index 00000000..b91a0049
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,3236 @@
+@@ -0,0 +1,3239 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -3300,8 +3300,11 @@ index 00000000..424ef2e2
 +		   READ_ONCE(dv_inj_mode_generation),
 +		   READ_ONCE(dv_inj_canvas_dirty) ? 1 : 0,
 +		   READ_ONCE(dv_inj_canvas_committed) ? 1 : 0);
-+	seq_printf(m, "canvas base=%lx pages=%u page_bytes=%u offset_px=%u bytes_per_pixel=%u repeat=%u snr=%u\n",
-+		   (unsigned long)READ_ONCE(dv_inj_rt.base),
++	/* No kernel address is printed: the mapping itself is what matters, and
++	 * the file is world-readable.
++	 */
++	seq_printf(m, "canvas resolved=%d pages=%u page_bytes=%u offset_px=%u bytes_per_pixel=%u repeat=%u snr=%u\n",
++		   (READ_ONCE(dv_inj_rt.ready) && READ_ONCE(dv_inj_rt.base)) ? 1 : 0,
 +		   READ_ONCE(dv_inj_rt.pages), READ_ONCE(dv_inj_rt.page_bytes),
 +		   READ_ONCE(osd_pixel_offset), READ_ONCE(bytes_per_pixel),
 +		   READ_ONCE(packet_repeat), READ_ONCE(dv_inj_display_snapshot.num_pkts));
