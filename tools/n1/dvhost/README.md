@@ -38,6 +38,14 @@ implementation, and the pixel words reproduce the packets.
 Not established: that a TV accepts these pixels, that the HDMI link carries
 them, or that the OSD canvas write reaches the wire. Those need the device.
 
+## What the fork's write path actually emits
+
+`write_rpu()` / `write_hevc_unspec62_nalu()` emit `0xFF || DM` only: no mapping,
+no CRC, no `0x80` terminator. A profile 7 -> 8.1 conversion rewrites the mapping
+in memory, so the emitted bytes are normally *identical*; the profile number is
+the observable proof that the branch ran. (The CLI's `fel_to_81.bin` fixtures
+differ because that path writes a full RPU.)
+
 ## Known defect recorded by G5
 
 The fork writes a 17-byte level-9 block while declaring 18; the kernel table

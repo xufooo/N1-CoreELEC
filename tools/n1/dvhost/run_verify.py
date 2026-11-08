@@ -77,9 +77,13 @@ def read_manifest(path):
                 continue
             kv = dict(p.split('=', 1) for p in parts[1:] if '=' in p)
             name = kv['fixture']
-            frames.setdefault(name, []).append(kv)
             if name not in order:
                 order.append(name)
+            # Rows that failed in the probe carry an error instead of a frame
+            # directory; they are counted by check_fork_run, not here.
+            if 'dir' not in kv:
+                continue
+            frames.setdefault(name, []).append(kv)
     return order, frames
 
 
@@ -216,7 +220,7 @@ def main():
     port_ok = port_bad = port_skip = 0
     nal_ok = nal_bad = 0
     for fixture in order:
-        for fr in frames[fixture]:
+        for fr in frames.get(fixture, []):
             idx = int(fr['idx'])
             base = os.path.join(args.forkout, fr['dir'])
             tag = '%s/f%d' % (fixture, idx)
@@ -280,7 +284,7 @@ def main():
     failures = []
     total = accepted = dm_bytes = 0
     for fixture in order:
-        for fr in frames[fixture]:
+        for fr in frames.get(fixture, []):
             idx = int(fr['idx'])
             base = os.path.join(args.forkout, fr['dir'])
             dm = open(os.path.join(base, 'f%03d.rpu' % idx), 'rb').read()[1:]
