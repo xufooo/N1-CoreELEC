@@ -30,7 +30,7 @@ struct FrameOut {
     converted: bool,
     /// `header.reserved_zero_3bits == 1` in the fork => compressed DM payload.
     compressed: bool,
-    rpu_type: u64,
+    rpu_type: u8,
     dm_present: bool,
     has_mapping: bool,
     nal_len: usize,
