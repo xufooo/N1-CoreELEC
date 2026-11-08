@@ -250,6 +250,52 @@ static int dv_injection_write_canvas(const struct vinfo_s *v) { return canvas_re
 static int dv_injection_send_vsif(const struct vinfo_s *v) { return send_result; }
 '''
 
+DIAG_SHIMS = r'''
+#include <stdio.h>
+#include <stdarg.h>
+typedef uint16_t u16; typedef int16_t s16;
+struct kernel_param_ops { int (*set)(const char *,const struct kernel_param *);
+                          int (*get)(char *,const struct kernel_param *); };
+typedef struct { int c; } atomic_t;
+#define ATOMIC_INIT(n) { (n) }
+static int atomic_read(const atomic_t *a) { return a->c; }
+static void atomic_set(atomic_t *a,int v) { a->c=v; }
+static int atomic_cmpxchg(atomic_t *a,int o,int n)
+{ int old=a->c; if(old==o) a->c=n; return old; }
+static int atomic_dec_return(atomic_t *a) { return --a->c; }
+#define DEFINE_SPINLOCK(x) int x
+static unsigned long jiffies_to_msecs(unsigned long j) { return j; }
+#define memcpy_fromio(d,s,n) memcpy((d),(const void *)(s),(n))
+#define module_param(n,t,perm)
+#define module_param_cb(n,o,a,perm)
+#define MODULE_PARM_DESC(n,t)
+static int param_get_uint(char *buf,const struct kernel_param *kp)
+{ (void)kp; buf[0]=0; return 0; }
+static int param_set_uint(const char *val,const struct kernel_param *kp)
+{ char *end; unsigned long v; if(!val) return -1;
+  v=strtoul(val,&end,0); if(*end) return -1;
+  *(unsigned int *)kp->arg=(unsigned int)v; return 0; }
+struct seq_file { char *buf; size_t len; size_t cap; };
+static void seq_putc(struct seq_file *m,char c)
+{ if(m->len+1<m->cap) { m->buf[m->len++]=c; m->buf[m->len]=0; } }
+static void seq_puts(struct seq_file *m,const char *s)
+{ while(*s) seq_putc(m,*s++); }
+static void seq_printf(struct seq_file *m,const char *fmt,...)
+{ va_list ap; int n;
+  if(m->len+1>=m->cap) return;
+  va_start(ap,fmt);
+  n=vsnprintf(m->buf+m->len,m->cap-m->len,fmt,ap);
+  va_end(ap);
+  if(n>0) { m->len+= (size_t)n; if(m->len>=m->cap) m->len=m->cap-1; } }
+/* The HDMI format snapshot lives in the driver; the harness supplies it. */
+static u32 fake_hic_vic=32, fake_hic_cs=0, fake_hic_cd=4, fake_hic_cr=1;
+static int fake_hic_ready=1;
+static void hdmitx_dv_injection_format(u32 *vic,u32 *cs,u32 *cd,u32 *cr,
+                                       u32 *ready)
+{ *vic=fake_hic_vic; *cs=fake_hic_cs; *cd=fake_hic_cd; *cr=fake_hic_cr;
+  *ready=(u32)fake_hic_ready; }
+'''
+
 STUBS = r'''
 static int dv_injection_build_candidate(const struct vinfo_s *vinfo, struct dv_inj_candidate *cand)
 {
@@ -804,6 +850,116 @@ static void test_packets(void) {
     }
 }
 
+
+static void diag_require(int cond,const char *what)
+{
+    if(!cond) { fprintf(stderr,"diag: %s failed\n",what); exit(1); }
+}
+
+/*
+ * The trace has to survive the states that matter: a refused display commit,
+ * a frame whose payload was never injected, and a canvas that really holds
+ * bytes.  Nothing here is a hardware test; it is the bookkeeping the image
+ * will be read back through.
+ */
+static void test_diag(void)
+{
+    struct dv_inj_slot slot;
+    struct kernel_param kp;
+    struct seq_file m;
+    struct vframe_s vf;
+    static char out[32768];
+    static u8 canvas[8192];
+    u8 payload[20];
+    u32 i;
+
+    dv_injection_diag=0; dv_injection_diag_frames=4; dv_injection_diag_commits=4;
+    kp.arg=&dv_injection_diag;
+    diag_require(dv_injection_diag_set("1",&kp)==0,"arm rc");
+    diag_require(dv_injection_diag==1,"arm value");
+    diag_require(atomic_read(&dv_inj_diag_frames_left)==4,"frames armed");
+    diag_require(atomic_read(&dv_inj_diag_commits_left)==4,"commits armed");
+
+    memset(&slot,0,sizeof(slot));
+    slot.generation=7; slot.mode_gen=3; slot.num_pkts=2;
+    dv_inj_diag_commit(DV_INJ_DIAG_NO_STREAM,&slot);
+    diag_require(atomic_read(&dv_inj_diag_commits_left)==3,"commit spent");
+    diag_require(dv_inj_diag_seq==1,"one record");
+    diag_require(dv_inj_diag_ring[0].kind==DV_INJ_DIAG_KIND_COMMIT,"commit kind");
+    diag_require(dv_inj_diag_ring[0].v0==DV_INJ_DIAG_NO_STREAM,"commit reason");
+    diag_require(dv_inj_diag_ring[0].generation==7,"commit generation");
+    diag_require(dv_inj_diag_ring[0].mode_gen==3,"commit mode gen");
+    diag_require(dv_inj_diag_ring[0].v1==2,"commit npkts");
+
+    memset(&vf,0,sizeof(vf)); vf.index=5;
+    memset(payload,0,sizeof(payload));
+    payload[0]=0x7c; payload[1]=0x01; payload[2]=0xff;
+    payload[3]=0x00; payload[4]=0x00; payload[5]=0x03;
+    dv_inj_diag_producer(&vf,900,payload,8,-22,0,0,false);
+    diag_require(atomic_read(&dv_inj_diag_frames_left)==3,"frame spent");
+    {
+        struct dv_inj_diag_rec *r=&dv_inj_diag_ring[1];
+        diag_require(r->kind==DV_INJ_DIAG_KIND_FRAME,"frame kind");
+        diag_require(r->slot==5,"frame slot");
+        diag_require(r->prefix[0]==0x7c&&r->prefix[1]==0x01&&r->prefix[2]==0xff,
+                     "prefix");
+        diag_require(r->crc==dv_injection_crc32(payload,8),"frame crc");
+        diag_require((r->flags & DV_INJ_DIAG_F_EPB)!=0,"epb flag");
+        diag_require(r->epb==1 && r->epb_first==3,"epb offset");
+        diag_require((r->flags & DV_INJ_DIAG_F_TRUNC)==0,"no trunc for 8B");
+        diag_require(r->v0==(u32)-22,"validate rc kept");
+        diag_require(r->v2==8,"payload len kept");
+    }
+    dv_inj_diag_producer(&vf,2000,payload,20,-71,0,0,true);
+    {
+        struct dv_inj_diag_rec *r=&dv_inj_diag_ring[2];
+        diag_require(r->hex_len==DV_INJ_DIAG_HEX,"hex capped");
+        diag_require((r->flags & DV_INJ_DIAG_F_TRUNC)!=0,"trunc flag");
+        diag_require((r->flags & DV_INJ_DIAG_F_HDR10P)!=0,"hdr10p flag");
+        diag_require(r->v0==(u32)-71,"second validate rc");
+    }
+
+    memset(canvas,0xAA,sizeof(canvas));
+    dv_inj_rt.ready=true; dv_inj_rt.base=canvas; dv_inj_rt.page_bytes=4096;
+    dv_inj_rt.pages=2;
+    dv_inj_state=DV_INJ_READY;
+    memset(&m,0,sizeof(m)); m.buf=out; m.cap=sizeof(out)-1;
+    diag_require(dv_inj_diag_show(&m,NULL)==0,"show rc");
+    diag_require(strstr(out,"state=READY")!=NULL,"state line");
+    diag_require(strstr(out,"hdmi vic=32 cs=0 cd=4 cr=1 ready=1")!=NULL,"hdmi line");
+    diag_require(strstr(out,"canvas page0[0..63] crc=")!=NULL,"canvas line");
+    diag_require(strstr(out,"aaaaaaaa")!=NULL,"canvas bytes");
+    diag_require(strstr(out,"no-stream")!=NULL,"commit reason printed");
+    diag_require(strstr(out,"7c01ff")!=NULL,"payload hex printed");
+    diag_require(strstr(out,"seq kind")!=NULL,"header");
+
+    for(i=0;i<10;i++)
+        dv_inj_diag_commit(DV_INJ_DIAG_OK,&slot);
+    diag_require(dv_inj_diag_seq==6,"only the remaining budget is used");
+    diag_require(atomic_read(&dv_inj_diag_commits_left)==0,"budget drained");
+    diag_require(dv_injection_diag_set("1",&kp)==0,"re-arm rc");
+    diag_require(atomic_read(&dv_inj_diag_commits_left)==4,"re-arm resets");
+
+    dv_injection_diag_set("0",&kp);
+    i=dv_inj_diag_seq;
+    dv_inj_diag_commit(DV_INJ_DIAG_NO_ENABLE,&slot);
+    diag_require(dv_inj_diag_seq==i,"disabled records nothing");
+
+    /* The ring keeps the newest records once it wraps. */
+    dv_injection_diag_frames=200; dv_injection_diag_commits=4;
+    dv_injection_diag_set("1",&kp);
+    for(i=0;i<200;i++) {
+        vf.index=i;
+        dv_inj_diag_producer(&vf,100,payload,8,0,0,1,false);
+    }
+    diag_require(atomic_read(&dv_inj_diag_frames_left)==0,"wrap budget drained");
+    diag_require(dv_inj_diag_head==dv_inj_diag_seq % DV_INJ_DIAG_RECORDS,
+                 "head follows seq");
+    diag_require(dv_inj_diag_ring[(dv_inj_diag_head + DV_INJ_DIAG_RECORDS - 1) %
+                                  DV_INJ_DIAG_RECORDS].frame==199,
+                 "newest record kept");
+}
+
 int main(int argc,char **argv) {
     assert(argc==2);
     if(!strcmp(argv[1],"metadata")) test_metadata();
@@ -812,6 +968,7 @@ int main(int argc,char **argv) {
     else if(!strcmp(argv[1],"state")) test_state_machine();
     else if(!strcmp(argv[1],"transport")) test_transport();
     else if(!strcmp(argv[1],"packets")) test_packets();
+    else if(!strcmp(argv[1],"diag")) test_diag();
     else return 2;
     return 0;
 }
@@ -846,7 +1003,19 @@ class KernelInjectionTests(unittest.TestCase):
         text = text.replace("static int dv_injection_enable_set(const char *val, const struct kernel_param *kp);", "")
         cfile = Path(cls.temp.name) / "contracts.c"
         capture = "static const u8 capture[] = {" + ",".join(map(str, CAPTURE)) + "};\n"
-        cfile.write_text(PREFIX + capture + "\n".join(function(text,n) for n in names) + STUBS + MAIN)
+        # The diagnostic trace lives in the same file; compile its declarations
+        # straight out of the patch so the harness cannot drift from it.
+        diag_end = "static void dv_inj_diag_format(u32 tag);\n"
+        diag = text[text.index("#define DV_INJ_DIAG_RECORDS 192"):
+                    text.index(diag_end) + len(diag_end)]
+        for extra in ("dv_inj_diag_take", "dv_inj_diag_add", "dv_inj_diag_common",
+                      "dv_inj_diag_producer", "dv_inj_diag_commit",
+                      "dv_inj_diag_format", "dv_inj_diag_state_name",
+                      "dv_inj_diag_reason_name", "dv_inj_diag_canvas_line",
+                      "dv_inj_diag_show", "dv_injection_diag_set"):
+            names = names + (extra,)
+        cfile.write_text(PREFIX + capture + DIAG_SHIMS + diag +
+                         "\n".join(function(text,n) for n in names) + STUBS + MAIN)
         subprocess.run([compiler,"-std=c99","-O1","-fsanitize=address,undefined",
                         "-fno-omit-frame-pointer",str(cfile),"-o",str(cls.binary)],check=True)
 
@@ -857,6 +1026,8 @@ class KernelInjectionTests(unittest.TestCase):
     def test_public_dm_and_invalid_inputs(self):
         subprocess.run([str(self.binary),"metadata"],check=True)
 
+    def test_diagnostic_trace(self):
+        subprocess.run([str(self.binary),"diag"],check=True)
     def test_recorded_canvas_bounds_and_parameters(self):
         subprocess.run([str(self.binary),"layout"],check=True)
 
