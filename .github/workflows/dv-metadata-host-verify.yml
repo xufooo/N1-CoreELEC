@@ -120,32 +120,16 @@ jobs:
           set -euo pipefail
           WORK="$RUNNER_TEMP/dvhost"
           {
-            echo "### DV metadata host verification"
-            echo
             echo "- fork: \`${FORK_REPO}@${FORK_SHA}\`"
             echo "- fork tarball sha256 verified: \`${FORK_TARBALL_SHA256}\`"
             echo "- rust: \`${RUST_VERSION}\`"
-            if [ -f "$WORK/summary.json" ]; then
-              python3 - "$WORK/summary.json" <<'PY'
-import json, sys
-s = json.load(open(sys.argv[1]))
-print()
-print("| group | cases | pass | fail | expected-fail |")
-print("|---|---|---|---|---|")
-for g in s.get('groups', []):
-    print("| %s | %d | %d | %d | %d |" % (
-        g['name'], g['cases'], g['pass'], g['fail'], g.get('expected_fail', 0)))
-print()
-print("fixtures: %d, frames: %d, dm_bytes_compared: %d, verdict: **%s**" % (
-    s.get('fixtures', 0), s.get('frames', 0), s.get('dm_bytes_compared', 0), s.get('verdict')))
-print()
-for note in s.get('notes', []):
-    print("- " + note)
-PY
-            else
-              echo "no summary produced"
-            fi
+            echo
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$WORK/summary.json" ]; then
+            python3 tools/n1/dvhost/summary_md.py "$WORK/summary.json" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no summary.json produced" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload host verification evidence
         if: always()
