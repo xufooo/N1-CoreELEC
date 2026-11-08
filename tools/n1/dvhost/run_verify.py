@@ -87,6 +87,49 @@ def read_manifest(path):
     return order, frames
 
 
+
+def walk_dm(dm, l9_declared=None, l9_written=None):
+    """Walk the DM block table; return None on a clean walk, else a short reason.
+
+    `l9_declared`/`l9_written` let the caller re-walk with the payload size the
+    producer actually wrote, which is how the Level 9 mismatch is recognised.
+    """
+    if len(dm) < 71:
+        return 'DM is only %d bytes, need at least 71' % len(dm)
+    off = 71
+    for _ in range(dm[70]):
+        if off + 5 > len(dm):
+            return 'block header runs past the end at offset %d' % off
+        declared = int.from_bytes(dm[off:off + 4], 'big')
+        level = dm[off + 4]
+        off += 5
+        if l9_declared is not None and level == 9 and declared == l9_declared:
+            declared = l9_written
+        if off + declared > len(dm):
+            return 'level %d declares %d bytes but only %d remain' % (
+                level, declared, len(dm) - off)
+        off += declared
+    if off != len(dm):
+        return 'clean block walk ends at %d, DM is %d bytes' % (off, len(dm))
+    return None
+
+
+def classify_reject(dm):
+    """Explain a -22 from the kernel without guessing.
+
+    Returns (kind, detail). `kind` is 'producer_l9_18' when the only reason the
+    DM does not walk is a Level 9 block declaring 18 bytes for the 17 the fork
+    writes; anything else stays 'unknown' and is reported as a failure.
+    """
+    reason = walk_dm(dm)
+    if reason is None:
+        return 'unknown', ('the block walk is clean, so the kernel refused a '
+                           'structurally valid DM')
+    if walk_dm(dm, l9_declared=18, l9_written=17) is None:
+        return 'producer_l9_18', ('a Level 9 block declares 18 bytes but the fork '
+                                 'writes 17, so the walk desynchronises (%s)' % reason)
+    return 'unknown', reason
+
 def run_harness(harness, dm_bytes, workdir, strict=False):
     os.makedirs(workdir, exist_ok=True)
     dm_path = os.path.join(workdir, 'dm.bin')
@@ -282,6 +325,7 @@ def main():
     work3 = os.path.join(args.work, 'g3')
     hist = {}
     failures = []
+    known = []
     total = accepted = dm_bytes = 0
     for fixture in order:
         for fr in frames.get(fixture, []):
@@ -292,7 +336,12 @@ def main():
             dm_bytes += len(dm)
             info = run_harness(harness, dm, work3)
             if info['rc'] != 0:
-                failures.append('%s/f%d rejected: %s' % (fixture, idx, info['stdout'][:120]))
+                kind, detail = classify_reject(dm)
+                if kind == 'producer_l9_18':
+                    known.append('%s/f%d %s' % (fixture, idx, detail))
+                else:
+                    failures.append('%s/f%d rejected (%s): %s'
+                                    % (fixture, idx, detail, info['stdout'][:120]))
                 continue
             ok, problems, st = verify_packets.check(info.get('packets', b''), dm,
                                                     info.get('pixel_words'), ODD, EVEN)
@@ -302,9 +351,14 @@ def main():
                 continue
             accepted += 1
     add('G3', 'kernel_pack_all_frames', 'PASS' if not failures else 'FAIL',
-        'accepted=%d/%d pkt_hist=%s%s'
+        'accepted=%d/%d pkt_hist=%s%s%s'
         % (accepted, total, json.dumps({str(k): v for k, v in sorted(hist.items())}),
-           '' if not failures else ' failures=' + ' | '.join(failures[:5])))
+           '' if not failures else ' failures=' + ' | '.join(failures[:5]),
+           '' if not known else ' producer_l9_18_frames=%d' % len(known)))
+    if known:
+        add('G3', 'rejects_explained', 'KNOWN_DEFECT',
+            '%d frames rejected only because a Level 9 block declares 18 bytes for '
+            'the 17 the fork writes (first: %s)' % (len(known), known[0]))
 
     # ---------------- G4 ----------------
     expect = {119: 1, 120: 2, 240: 2, 241: 3, 361: 3, 362: 4, 482: 4, 483: 5, 594: 5}

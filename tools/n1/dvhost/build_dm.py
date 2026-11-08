@@ -25,18 +25,21 @@ FIXED_PART = 70
 DECLARED = {
     1: {6: 6},
     2: {14: 14},
+    3: {6: 6},
     4: {4: 4},
     5: {8: 8},
     6: {8: 8},
+    8: {13: 13, 15: 15, 17: 17, 23: 23, 29: 29},
     9: {1: 1, 17: 18},
-    10: {2: 6, 16: 22},
-    11: {0: 4},
-    254: {0: 2},
-    255: {0: 6},
+    10: {6: 6, 22: 22},
+    11: {4: 4},
+    254: {2: 2},
+    255: {6: 6},
 }
 
-# Bytes of zero padding the fork appends after the payload of these levels.
-PADDING = {6: 0, 11: 4, 254: 2, 255: 6}
+# Zero padding the fork appends after a payload. Empty: every modelled level
+# writes exactly the number of bytes it declares.
+PADDING = {}
 
 
 class UnsupportedLevel(Exception):
@@ -103,6 +106,9 @@ def block_payload(level, block):
                 u16(block.get('trim_chroma_weight', 0)) +
                 u16(block.get('trim_saturation_gain', 0)) +
                 s16(block.get('ms_weight', 0)))
+    if level == 3:
+        return (u16(block.get('min_pq_offset', 0)) + u16(block.get('max_pq_offset', 0)) +
+                u16(block.get('avg_pq_offset', 0)))
     if level == 4:
         return u16(block.get('anchor_pq', 0)) + u16(block.get('anchor_power', 0))
     if level == 5:
@@ -115,7 +121,52 @@ def block_payload(level, block):
                 u16(block.get('min_display_mastering_luminance', 0)) +
                 u16(block.get('max_content_light_level', 0)) +
                 u16(block.get('max_frame_average_light_level', 0)))
+    if level == 8:
+        length = block.get('length', 10)
+        out = bytearray([block.get('target_display_index', 0) & 0xFF])
+        for name in ('trim_slope', 'trim_offset', 'trim_power', 'trim_chroma_weight',
+                     'trim_saturation_gain', 'ms_weight'):
+            out += u16(block.get(name, 0))
+        if length > 10:
+            out += u16(block.get('target_mid_contrast', 0))
+        if length > 12:
+            out += u16(block.get('clip_trim', 0))
+        if length > 13:
+            for i in range(6):
+                out.append(block.get('saturation_vector_field%d' % i, 0) & 0xFF)
+        if length > 19:
+            for i in range(6):
+                out.append(block.get('hue_vector_field%d' % i, 0) & 0xFF)
+        return bytes(out)
+    if level == 10:
+        length = block.get('length', 5)
+        out = bytearray([block.get('target_display_index', 0) & 0xFF])
+        out += u16(block.get('target_max_pq', 0))
+        out += u16(block.get('target_min_pq', 0))
+        out.append(block.get('target_primary_index', 0) & 0xFF)
+        if length > 5:
+            for name in ('target_primary_red_x', 'target_primary_red_y',
+                         'target_primary_green_x', 'target_primary_green_y',
+                         'target_primary_blue_x', 'target_primary_blue_y',
+                         'target_primary_white_x', 'target_primary_white_y'):
+                out += u16(block.get(name, 0))
+        return bytes(out)
+    if level == 11:
+        wp = block.get('whitepoint', 0)
+        if block.get('reference_mode_flag'):
+            wp += 16
+        return bytes([block.get('content_type', 0) & 0xFF, wp & 0xFF,
+                      block.get('reserved_byte2', 0) & 0xFF,
+                      block.get('reserved_byte3', 0) & 0xFF])
+    if level == 254:
+        return bytes([block.get('dm_mode', 0) & 0xFF, block.get('dm_version_index', 0) & 0xFF])
+    if level == 255:
+        return bytes([block.get('dm_run_mode', 0) & 0xFF, block.get('dm_run_version', 0) & 0xFF,
+                      block.get('dm_debug0', 0) & 0xFF, block.get('dm_debug1', 0) & 0xFF,
+                      block.get('dm_debug2', 0) & 0xFF, block.get('dm_debug3', 0) & 0xFF])
     if level == 9:
+        if block.get('length', 1) > 1:
+            raise UnsupportedLevel('level 9 declares 18 bytes but the fork writes 17')
         out = bytearray([block.get('source_primary_index', 0) & 0xFF])
         if block.get('length', 1) > 1:
             for name in ('source_primary_red_x', 'source_primary_red_y',
@@ -139,12 +190,13 @@ def blocks_of(rpu):
                 raise UnsupportedLevel('unexpected block key %r' % key)
             blocks.append((int(key[len('Level'):]), value))
     if not blocks:
-        cm = (rpu['vdr_dm_data'].get('cmv29_metadata') or {}).get('ext_metadata_blocks') or []
-        for entry in cm:
-            for key, value in entry.items():
-                if not key.startswith('Level'):
-                    raise UnsupportedLevel('unexpected block key %r' % key)
-                blocks.append((int(key[len('Level'):]), value))
+        dm = rpu['vdr_dm_data']
+        for name in ('cmv29_metadata', 'cmv40_metadata'):
+            for entry in (dm.get(name) or {}).get('ext_metadata_blocks') or []:
+                for key, value in entry.items():
+                    if not key.startswith('Level'):
+                        raise UnsupportedLevel('unexpected block key %r' % key)
+                    blocks.append((int(key[len('Level'):]), value))
     return blocks
 
 
