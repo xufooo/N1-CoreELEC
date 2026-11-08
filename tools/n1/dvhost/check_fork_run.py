@@ -68,14 +68,17 @@ def main():
     if len(frames) < args.min_frames:
         problems.append('only %d frames parsed (want >= %d)' % (len(frames), args.min_frames))
 
-    # The chain only exercises real work if a profile 7 fixture converted.
-    control = [f for f in frames if f.get('ctl_rpu_len', '-') not in ('-', '')]
-    changed = [f for f in control if f.get('ctl_rpu_len') != f.get('rpu_len')]
+    # The chain only exercises real work if a profile 7 fixture conversion
+    # actually changed the bytes; length alone is not a signal because the DM
+    # size is usually identical either way.
+    control = [f for f in frames if f.get('ctl_same', '-') not in ('-', '')]
+    changed = [f for f in control if f.get('ctl_same') == '0']
     if not control:
         problems.append('no profile 7 frame was converted, so the To81 branch is untested')
     elif not changed:
-        problems.append('profile 7 conversion did not change any frame length')
-    print('profile 7 controls: %d, lengths changed: %d' % (len(control), len(changed)))
+        problems.append('profile 7 conversion left every frame byte-identical')
+    print('profile 7 controls: %d, byte-different after conversion: %d'
+          % (len(control), len(changed)))
 
     if problems:
         print('\nPROBE RUN UNUSABLE:')

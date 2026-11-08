@@ -36,6 +36,8 @@ struct FrameOut {
     nal_len: usize,
     rpu_len: usize,
     control_rpu_len: Option<usize>,
+    /// 1 when the unconverted bytes are identical to the converted ones.
+    control_same: Option<bool>,
 }
 
 fn split_nals(data: &[u8]) -> Vec<&[u8]> {
@@ -156,9 +158,11 @@ fn process_fixture(path: &Path, out_root: &Path, manifest: &mut String) -> (usiz
 
         // Control: profile 7 without conversion, from a fresh parse.
         let mut control_len = None;
+        let mut control_same = None;
         if profile_in == 7 {
             if let Ok(fresh) = DoviRpu::parse_unspec62_nalu(&input) {
                 if let Ok(bytes) = fresh.write_rpu() {
+                    control_same = Some(bytes == rpu_bytes);
                     write_out(&dir, &format!("f{:03}.ctl.rpu", idx), &bytes).unwrap();
                     control_len = Some(bytes.len());
                 }
@@ -177,11 +181,13 @@ fn process_fixture(path: &Path, out_root: &Path, manifest: &mut String) -> (usiz
             nal_len: nal.len(),
             rpu_len: rpu_bytes.len(),
             control_rpu_len: control_len,
+            control_same,
         };
         writeln!(
             manifest,
             "FRAME fixture={} idx={} profile_in={} profile_out={} converted={} compressed={} \
-             rpu_type={} dm_present={} mapping={} nal_len={} rpu_len={} ctl_rpu_len={} dir={}",
+             rpu_type={} dm_present={} mapping={} nal_len={} rpu_len={} ctl_rpu_len={} \
+             ctl_same={} dir={}",
             name,
             fo.index,
             fo.profile_in,
@@ -194,6 +200,9 @@ fn process_fixture(path: &Path, out_root: &Path, manifest: &mut String) -> (usiz
             fo.nal_len,
             fo.rpu_len,
             fo.control_rpu_len.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+            fo.control_same
+                .map(|v| if v { "1" } else { "0" })
+                .unwrap_or("-"),
             dir.file_name().unwrap().to_string_lossy(),
         )
         .unwrap();
