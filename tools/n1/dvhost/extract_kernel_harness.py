@@ -4,6 +4,7 @@
 Nothing is re-implemented here: the harness `#include`s verbatim copies of
 
     dv_injection_block_length()
+    dv_injection_walk_metadata()
     dv_injection_validate_metadata()
     dv_injection_crc32()
     dv_injection_pkt_type()
@@ -26,6 +27,7 @@ import sys
 
 FUNCS = [
     'dv_injection_block_length',
+    'dv_injection_walk_metadata',
     'dv_injection_validate_metadata',
     'dv_injection_crc32',
     'dv_injection_pkt_type',
@@ -65,7 +67,8 @@ int main(int argc, char **argv)
 	FILE *f;
 
 	if (argc < 3) {
-		fprintf(stderr, "usage: %s <dm.bin> <outdir> [strict] [odd] [even]\n",
+		fprintf(stderr,
+			"usage: %s <dm.bin> <outdir> [strict] [odd] [even] [max_pad]\n",
 			argv[0]);
 		return 2;
 	}
@@ -82,10 +85,26 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	rc = dv_injection_validate_metadata(dm, (u32)dm_len);
-	printf("dm_len=%zu validate=%d\n", dm_len, rc);
-	if (rc)
-		return 10;
+	if (argc > 6) {
+		/* Decoder-aux semantics: the reported length may carry the sink
+		 * alignment padding, so the walk reports the metadata length and
+		 * everything downstream must use it.
+		 */
+		u32 max_pad = (u32)atoi(argv[6]);
+		u32 eff = 0;
+
+		rc = dv_injection_walk_metadata(dm, (u32)dm_len, max_pad, &eff);
+		printf("dm_len=%zu max_pad=%u eff=%u validate=%d\n",
+		       dm_len, max_pad, eff, rc);
+		if (rc)
+			return 10;
+		dm_len = eff;
+	} else {
+		rc = dv_injection_validate_metadata(dm, (u32)dm_len);
+		printf("dm_len=%zu validate=%d\n", dm_len, rc);
+		if (rc)
+			return 10;
+	}
 
 	rc = dv_injection_pack_bytes(pkts, &num_pkts, dm, (u32)dm_len);
 	printf("pack_rc=%d num_pkts=%u\n", rc, num_pkts);

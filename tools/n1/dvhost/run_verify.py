@@ -130,14 +130,17 @@ def classify_reject(dm):
                                  'writes 17, so the walk desynchronises (%s)' % reason)
     return 'unknown', reason
 
-def run_harness(harness, dm_bytes, workdir, strict=False):
+def run_harness(harness, dm_bytes, workdir, strict=False, max_pad=None):
     os.makedirs(workdir, exist_ok=True)
     dm_path = os.path.join(workdir, 'dm.bin')
     with open(dm_path, 'wb') as f:
         f.write(dm_bytes)
     cmd = [harness, dm_path, workdir]
-    if strict:
-        cmd.append('1')
+    if strict or max_pad is not None:
+        cmd.append('1' if strict else '0')
+    if max_pad is not None:
+        cmd += ['0', '0', str(max_pad)]
+    
     proc = subprocess.run(cmd, capture_output=True, text=True)
     info = {'rc': proc.returncode, 'stdout': proc.stdout.strip()}
     pkt_path = os.path.join(workdir, 'packets.bin')
@@ -386,6 +389,64 @@ def main():
         'PASS' if 'validate=0' not in info['stdout'] else 'FAIL',
         info['stdout'].splitlines()[0] if info['stdout'] else 'rc=%d' % info['rc'])
 
+    # ---------------- G7 ----------------
+    # The sink hands the decoder buffer over padded to 32 bytes, so the length
+    # the module sees is an upper bound.  This group replays exactly that on
+    # the real fork bytes and requires the packet bytes to be identical to the
+    # unpadded run: the effective length has to reach pack, not just validate.
+    work7 = os.path.join(args.work, 'g7')
+    pad_ok = pad_bad = tail_ok = tail_bad = sweep_ok = sweep_bad = 0
+    pad_problems = []
+    for fixture in order:
+        fr_list = frames.get(fixture, [])
+        for pos, fr in enumerate(fr_list):
+            idx = int(fr['idx'])
+            base = os.path.join(args.forkout, fr['dir'])
+            dm = open(os.path.join(base, 'f%03d.rpu' % idx), 'rb').read()[1:]
+            ref = run_harness(harness, dm, work7)
+            if ref['rc'] != 0:
+                kind, _ = classify_reject(dm)
+                if kind == 'producer_l9_18':
+                    continue
+                pad_problems.append('%s/f%d canonical rejected' % (fixture, idx))
+                pad_bad += 1
+                continue
+            nal = 3 + len(dm)
+            pad = (nal + 31) // 32 * 32 - nal
+            aux = dm + b'\x00' * pad
+            got = run_harness(harness, aux, work7, max_pad=31)
+            if got['rc'] != 0:
+                pad_problems.append('%s/f%d aux rejected: %s'
+                                    % (fixture, idx, got['stdout'][:100]))
+                pad_bad += 1
+            elif got.get('packets') != ref.get('packets'):
+                pad_problems.append('%s/f%d packets differ under padding'
+                                    % (fixture, idx))
+                pad_bad += 1
+            else:
+                pad_ok += 1
+            bad_tail = run_harness(harness, aux + b'\x01', work7, max_pad=31)
+            if bad_tail['rc'] == 0:
+                pad_problems.append('%s/f%d non-zero tail accepted' % (fixture, idx))
+                tail_bad += 1
+            else:
+                tail_ok += 1
+            # exhaustive 0..31 sweep on the first frame of the first three fixtures
+            if pos == 0 and order.index(fixture) < 3:
+                for n in range(32):
+                    sweep = run_harness(harness, dm + b'\x00' * n, work7,
+                                        max_pad=31)
+                    if sweep['rc'] != 0 or sweep.get('packets') != ref.get('packets'):
+                        pad_problems.append('%s pad %d failed' % (fixture, n))
+                        sweep_bad += 1
+                    else:
+                        sweep_ok += 1
+    add('G7', 'aux_padding_roundtrip',
+        'PASS' if not (pad_bad or tail_bad or sweep_bad) else 'FAIL',
+        'aux_ok=%d aux_bad=%d tail_rejected=%d tail_accepted=%d sweep_ok=%d sweep_bad=%d%s'
+        % (pad_ok, pad_bad, tail_ok, tail_bad, sweep_ok, sweep_bad,
+           '' if not pad_problems else ' failures=' + ' | '.join(pad_problems[:5])))
+
     # ---------------- G5 ----------------
     work5 = os.path.join(args.work, 'g5')
     l9 = [
@@ -437,7 +498,7 @@ def main():
     # ---------------- summary ----------------
     hard_fail = [r for r in rows if r['status'] == 'FAIL']
     groups = []
-    for gid in ('G1', 'G2', 'G3', 'G4', 'G5', 'G6'):
+    for gid in ('G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7'):
         mine = [r for r in rows if r['group'] == gid]
         if gid in ('G1', 'G2'):
             mine = mine  # summary rows only

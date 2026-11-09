@@ -26,7 +26,7 @@ Everything runs in `.github/workflows/dv-metadata-host-verify.yml`
 | `build_dm.py` | Python port of the fork's DM serializer, used only to localise a disagreement |
 | `verify_packets.py` | independent packet/CRC/pixel checker (re-derives the rules from the reference implementation) |
 | `check_fork_run.py` | refuses a fork run that parsed nothing or converted no profile-7 frame |
-| `run_verify.py` | orchestrates the groups G1..G6 and writes `summary.json` / `verify.log` |
+| `run_verify.py` | orchestrates the groups G1..G7 and writes `summary.json` / `verify.log` |
 
 ## What a green run does and does not mean
 
@@ -45,6 +45,16 @@ no CRC, no `0x80` terminator. A profile 7 -> 8.1 conversion rewrites the mapping
 in memory, so the emitted bytes are normally *identical*; the profile number is
 the observable proof that the branch ran. (The CLI's `fel_to_81.bin` fixtures
 differ because that path writes a full RPU.)
+
+## G7: the length the sink reports is an upper bound
+
+A decoder hands the auxiliary buffer over padded, so the size the module is told
+about is rounded up (32 bytes on the reference platform) and the trailing pad is
+zero. G7 replays that on the fork's own frames: the padded buffer has to be
+accepted, the *packets* have to stay byte-identical to the unpadded run, a
+non-zero tail has to be refused, and 0..31 bytes of pad are swept on a few
+shapes. A group that only checked "validate returns 0" would still put a
+157-byte header count on the wire, which is why the packet comparison matters.
 
 ## Known defect recorded by G5
 

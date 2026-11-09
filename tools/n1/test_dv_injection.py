@@ -55,15 +55,7 @@ PREFIX = r'''
 #include <errno.h>
 #include <assert.h>
 typedef uint8_t u8; typedef uint32_t u32; typedef uint64_t u64;
-#define DV_INJ_MAX_METADATA_SIZE 594
-#define DV_INJ_MAX_NUM_HDR_DM_PACKETS 5
-#define DV_INJ_NUM_HDR_DM_PACKET_REPEATS 3
-#define DV_INJ_PIXELS_PER_PKT 1024
-#define DV_INJ_NUM_BYTES_PER_PACKET 128
-#define DV_INJ_CRC_OFFSET 124
-#define DV_INJ_BITS_PER_BYTE 8
-#define DV_INJ_ODD_INJECTION 0xFFFFFFFF
-#define DV_INJ_EVEN_INJECTION 0xFF000000
+/* DV_INJ_* constants are appended here straight from the patch. */
 enum hdr_dm_packet_type { DV_INJ_FIRST_AND_ONLY_PKT = 0,
                           DV_INJ_FIRST_OF_MULTIPLE_PKT,
                           DV_INJ_CONTINUING_PKT,
@@ -347,6 +339,46 @@ static void test_metadata(void) {
     memset(bad,0,sizeof(bad)); bad[0]=0x19; bad[1]=8;
     assert(dv_injection_validate_metadata(bad,235) == -EINVAL);
     assert(dv_injection_validate_metadata(NULL,181) == -EINVAL);
+}
+
+/* The decoder hands the auxiliary buffer over rounded up to 32 bytes, so the
+ * reported length is an upper bound.  Only that path may accept the padding,
+ * it has to be zero, and the length the packetiser receives must be the real
+ * metadata length - otherwise a short packet header goes on the wire. */
+static void test_aux_padding(void) {
+    u8 buf[594 + 32];
+    u32 eff = 0, pad;
+    u8 num_pkts = 0, ref_np = 0;
+    static u8 pkts[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_NUM_BYTES_PER_PACKET];
+    static u8 ref[DV_INJ_MAX_NUM_HDR_DM_PACKETS][DV_INJ_NUM_BYTES_PER_PACKET];
+
+    assert(dv_injection_pack_bytes(ref,&ref_np,capture,sizeof(capture)) == 0);
+    for (pad = 0; pad <= DV_INJ_AUX_PAD_MAX; pad++) {
+        memcpy(buf,capture,sizeof(capture));
+        memset(buf + sizeof(capture),0,pad);
+        eff = 0;
+        assert(dv_injection_walk_metadata(buf,sizeof(capture) + pad,
+                                          DV_INJ_AUX_PAD_MAX,&eff) == 0);
+        assert(eff == sizeof(capture));
+        assert(dv_injection_pack_bytes(pkts,&num_pkts,buf,eff) == 0);
+        assert(num_pkts == ref_np);
+        assert(memcmp(pkts,ref,(size_t)num_pkts * DV_INJ_NUM_BYTES_PER_PACKET) == 0);
+        assert(dv_injection_validate_metadata(buf,sizeof(capture) + pad) == -EINVAL);
+    }
+    memcpy(buf,capture,sizeof(capture)); memset(buf + sizeof(capture),0,7);
+    buf[sizeof(capture) + 6] = 1;
+    eff = 0;
+    assert(dv_injection_walk_metadata(buf,sizeof(capture) + 7,
+                                      DV_INJ_AUX_PAD_MAX,&eff) == -EINVAL);
+    memcpy(buf,capture,sizeof(capture));
+    memset(buf + sizeof(capture),0,DV_INJ_AUX_PAD_MAX + 1);
+    eff = 0;
+    assert(dv_injection_walk_metadata(buf,sizeof(capture) + DV_INJ_AUX_PAD_MAX + 1,
+                                      DV_INJ_AUX_PAD_MAX,&eff) == -EINVAL);
+    memcpy(buf,capture,sizeof(capture)); buf[70]--;
+    eff = 0;
+    assert(dv_injection_walk_metadata(buf,sizeof(capture),DV_INJ_AUX_PAD_MAX,
+                                      &eff) == -EINVAL);
 }
 static void test_layout(void) {
     u64 page; u32 pages;
@@ -895,7 +927,7 @@ static void test_diag(void)
     memset(payload,0,sizeof(payload));
     payload[0]=0x7c; payload[1]=0x01; payload[2]=0xff;
     payload[3]=0x00; payload[4]=0x00; payload[5]=0x03;
-    dv_inj_diag_producer(&vf,900,payload,8,-22,0,0,false);
+    dv_inj_diag_producer(&vf,900,payload,8,8,-22,0,0,false);
     diag_require(atomic_read(&dv_inj_diag_frames_left)==3,"frame spent");
     {
         struct dv_inj_diag_rec *r=&dv_inj_diag_ring[1];
@@ -909,14 +941,18 @@ static void test_diag(void)
         diag_require((r->flags & DV_INJ_DIAG_F_TRUNC)==0,"no trunc for 8B");
         diag_require(r->v0==(u32)-22,"validate rc kept");
         diag_require(r->v2==8,"payload len kept");
+        diag_require(r->eff_len==8 && r->pad==0,"no padding recorded");
     }
-    dv_inj_diag_producer(&vf,2000,payload,20,-71,0,0,true);
+    dv_inj_diag_producer(&vf,2000,payload,24,20,-71,0,0,true);
     {
         struct dv_inj_diag_rec *r=&dv_inj_diag_ring[2];
         diag_require(r->hex_len==DV_INJ_DIAG_HEX,"hex capped");
         diag_require((r->flags & DV_INJ_DIAG_F_TRUNC)!=0,"trunc flag");
         diag_require((r->flags & DV_INJ_DIAG_F_HDR10P)!=0,"hdr10p flag");
         diag_require(r->v0==(u32)-71,"second validate rc");
+        diag_require(r->eff_len==20 && r->pad==4,"padding recorded");
+        diag_require(r->crc==dv_injection_crc32(payload,20),
+                     "crc covers the metadata, not the padding");
     }
 
     memset(canvas,0xAA,sizeof(canvas));
@@ -932,6 +968,7 @@ static void test_diag(void)
     diag_require(strstr(out,"no-stream")!=NULL,"commit reason printed");
     diag_require(strstr(out,"7c01ff")!=NULL,"payload hex printed");
     diag_require(strstr(out,"seq kind")!=NULL,"header");
+    diag_require(strstr(out,"eff=20 pad=4")!=NULL,"padding in the frame line");
 
     for(i=0;i<10;i++)
         dv_inj_diag_commit(DV_INJ_DIAG_OK,&slot);
@@ -950,7 +987,7 @@ static void test_diag(void)
     dv_injection_diag_set("1",&kp);
     for(i=0;i<200;i++) {
         vf.index=i;
-        dv_inj_diag_producer(&vf,100,payload,8,0,0,1,false);
+        dv_inj_diag_producer(&vf,100,payload,8,8,0,0,1,false);
     }
     diag_require(atomic_read(&dv_inj_diag_frames_left)==0,"wrap budget drained");
     diag_require(dv_inj_diag_head==dv_inj_diag_seq % DV_INJ_DIAG_RECORDS,
@@ -963,6 +1000,7 @@ static void test_diag(void)
 int main(int argc,char **argv) {
     assert(argc==2);
     if(!strcmp(argv[1],"metadata")) test_metadata();
+    else if(!strcmp(argv[1],"auxpad")) test_aux_padding();
     else if(!strcmp(argv[1],"layout")) test_layout();
     else if(!strcmp(argv[1],"lifecycle")) test_lifecycle();
     else if(!strcmp(argv[1],"state")) test_state_machine();
@@ -984,7 +1022,9 @@ class KernelInjectionTests(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory(prefix="n1-dv-kernel-")
         cls.binary = Path(cls.temp.name) / "contracts"
         text = source()
-        names = ("dv_injection_block_length", "dv_injection_validate_metadata",
+        names = ("dv_injection_block_length",
+                 "dv_injection_walk_metadata",
+                 "dv_injection_validate_metadata",
                  "dv_injection_canvas_layout", "dv_injection_deactivate",
                  "dv_injection_publish_candidate", "dv_injection_note_canvas_change",
                  "dv_injection_note_canvas_committed",
@@ -1014,7 +1054,20 @@ class KernelInjectionTests(unittest.TestCase):
                       "dv_inj_diag_reason_name", "dv_inj_diag_canvas_line",
                       "dv_inj_diag_show", "dv_injection_diag_set"):
             names = names + (extra,)
-        cfile.write_text(PREFIX + capture + DIAG_SHIMS + diag +
+        # Join backslash continuations: DV_INJ_PIXELS_PER_PKT is multi-line, and
+        # a truncated copy silently swallows the #define that follows it.
+        defines, pending = [], ""
+        for line in text.splitlines():
+            pending += line
+            if pending.endswith("\\"):
+                pending = pending[:-1] + " "
+                continue
+            if pending.startswith("#define DV_INJ_") and \
+               not pending.startswith("#define DV_INJ_DIAG_"):
+                defines.append(pending)
+            pending = ""
+        defines = "\n".join(defines)
+        cfile.write_text(defines + "\n" + PREFIX + capture + DIAG_SHIMS + diag +
                          "\n".join(function(text,n) for n in names) + STUBS + MAIN)
         subprocess.run([compiler,"-std=c99","-O1","-fsanitize=address,undefined",
                         "-fno-omit-frame-pointer",str(cfile),"-o",str(cls.binary)],check=True)

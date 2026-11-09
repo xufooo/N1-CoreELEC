@@ -1,5 +1,5 @@
 diff --git a/drivers/amlogic/media/enhancement/amvecm/amcsc.c b/drivers/amlogic/media/enhancement/amvecm/amcsc.c
-index bc9ac744..95845cf3 100644
+index bc9ac74..95845cf 100644
 --- a/drivers/amlogic/media/enhancement/amvecm/amcsc.c
 +++ b/drivers/amlogic/media/enhancement/amvecm/amcsc.c
 @@ -43,6 +43,9 @@
@@ -28,7 +28,7 @@ index bc9ac744..95845cf3 100644
  		vdev = vinfo->vout_device;
  
 diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_fb.c
-index 192948b9..c5c0e027 100644
+index 192948b..c5c0e02 100644
 --- a/drivers/amlogic/media/osd/osd_fb.c
 +++ b/drivers/amlogic/media/osd/osd_fb.c
 @@ -28,6 +28,9 @@
@@ -69,7 +69,7 @@ index 192948b9..c5c0e027 100644
  			if (fb_ion_client &&
  			    fb_ion_handle[index][i]) {
 diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_hw.c
-index 12d2dfc3..3719657b 100644
+index 12d2dfc..3719657 100644
 --- a/drivers/amlogic/media/osd/osd_hw.c
 +++ b/drivers/amlogic/media/osd/osd_hw.c
 @@ -34,6 +34,9 @@
@@ -139,7 +139,7 @@ index 12d2dfc3..3719657b 100644
  }
  
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
-index 68c8f4ba..579d13d0 100644
+index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
 +++ b/drivers/amlogic/media/video_sink/Kconfig
 @@ -29,4 +29,16 @@ config AMLOGIC_MEDIA_VIDEOCAPTURE
@@ -160,7 +160,7 @@ index 68c8f4ba..579d13d0 100644
 +
  endmenu
 diff --git a/drivers/amlogic/media/video_sink/Makefile b/drivers/amlogic/media/video_sink/Makefile
-index 942f1761..05d1d938 100644
+index 942f176..05d1d93 100644
 --- a/drivers/amlogic/media/video_sink/Makefile
 +++ b/drivers/amlogic/media/video_sink/Makefile
 @@ -2,6 +2,10 @@ obj-y	+=	amvideo.o
@@ -176,10 +176,10 @@ index 942f1761..05d1d938 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 00000000..b91a0049
+index 0000000..c5464fa
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,3239 @@
+@@ -0,0 +1,3297 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -426,6 +426,12 @@ index 00000000..b91a0049
 +#define DV_INJ_PIXELS_PER_PKT		(DV_INJ_NUM_BYTES_PER_PACKET * \
 +					 DV_INJ_BITS_PER_BYTE)
 +#define DV_INJ_MAX_METADATA_SIZE	594
++/* The sink reports its auxiliary buffer length rounded up to its own
++ * alignment, so a good DM can arrive with up to 31 zero bytes behind it.
++ * DV_INJ_AUX_PAD_MAX is that transport allowance; it says nothing about the
++ * metadata itself, which still has to fit in DV_INJ_MAX_METADATA_SIZE.
++ */
++#define DV_INJ_AUX_PAD_MAX	31
 +
 +/* pixel patterns used to carry one bit */
 +#define DV_INJ_ODD_INJECTION		0xFFFFFFFF
@@ -711,6 +717,8 @@ index 00000000..b91a0049
 +	u32 v1;
 +	u32 v2;
 +	u32 v3;
++	u32 eff_len;
++	u32 pad;
 +	u32 crc;
 +	u32 epb_first;
 +	u16 epb;
@@ -758,8 +766,8 @@ index 00000000..b91a0049
 +
 +static void dv_inj_diag_producer(const struct vframe_s *vf, u32 sei_size,
 +				 const u8 *payload, u32 payload_len,
-+				 int validate_rc, int pack_rc, u32 num_pkts,
-+				 bool from_hdr10p);
++				 u32 eff_len, int validate_rc, int pack_rc,
++				 u32 num_pkts, bool from_hdr10p);
 +static void dv_inj_diag_commit(int reason, const struct dv_inj_slot *slot);
 +static void dv_inj_diag_format(u32 tag);
 +
@@ -804,14 +812,32 @@ index 00000000..b91a0049
 +	}
 +}
 +
-+static int dv_injection_validate_metadata(const u8 *data, u32 size)
++/*
++ * Walk the extension records of a Display Management payload.
++ *
++ * max_pad is the number of trailing zero bytes the caller is willing to
++ * accept behind the last record, and eff_len receives the length of the
++ * metadata without that padding.  Only the decoder auxiliary path passes a
++ * non-zero max_pad: the sink rounds the length it reports up to 32 bytes, so
++ * a payload of 136 bytes of metadata reaches us as 157 bytes.  Every other
++ * caller passes 0 and keeps the exact-length rule.
++ *
++ * The padding is accepted only when it is zero and no longer than the
++ * allowance, and the walked length is what has to fit in
++ * DV_INJ_MAX_METADATA_SIZE: a 594-byte payload with padding behind it is
++ * still valid, while 595 bytes of real metadata is not.  A block count that
++ * is too small cannot hide behind the padding either, because the leftover
++ * record always starts with a non-zero length field.
++ */
++static int dv_injection_walk_metadata(const u8 *data, u32 size, u32 max_pad,
++				      u32 *eff_len)
 +{
-+	u32 offset = 71, i, length;
++	u32 offset = 71, i, length, pad;
 +
-+	if (!data || size < 71 || size > DV_INJ_MAX_METADATA_SIZE)
++	if (!data || size < 71 || size > DV_INJ_MAX_METADATA_SIZE + max_pad)
 +		return -EINVAL;
 +	if (strict_dm_format &&
-+	    (data[60] != 12 || data[61] > 2 || data[62] != 1 || data[63] > 1))
++	    (data[60] != 12 || data[61] > 2 || data[62] > 1 || data[63] > 1))
 +		return -EINVAL;
 +	for (i = 0; i < data[70]; i++) {
 +		if (size - offset < 5)
@@ -825,7 +851,25 @@ index 00000000..b91a0049
 +			return -EINVAL;
 +		offset += length;
 +	}
-+	return offset == size ? 0 : -EINVAL;
++	if (offset > size)
++		return -EINVAL;
++	pad = size - offset;
++	if (pad > max_pad)
++		return -EINVAL;
++	for (i = offset; i < size; i++) {
++		if (data[i])
++			return -EINVAL;
++	}
++	if (offset > DV_INJ_MAX_METADATA_SIZE)
++		return -EINVAL;
++	if (eff_len)
++		*eff_len = offset;
++	return 0;
++}
++
++static int dv_injection_validate_metadata(const u8 *data, u32 size)
++{
++	return dv_injection_walk_metadata(data, size, 0, NULL);
 +}
 +
 +static int dv_injection_parse_metadata(const char *hex, u8 *out)
@@ -918,8 +962,8 @@ index 00000000..b91a0049
 + */
 +static void dv_inj_diag_producer(const struct vframe_s *vf, u32 sei_size,
 +				 const u8 *payload, u32 payload_len,
-+				 int validate_rc, int pack_rc, u32 num_pkts,
-+				 bool from_hdr10p)
++				 u32 eff_len, int validate_rc, int pack_rc,
++				 u32 num_pkts, bool from_hdr10p)
 +{
 +	struct dv_inj_diag_rec rec;
 +	u32 i;
@@ -936,23 +980,27 @@ index 00000000..b91a0049
 +	rec.v1 = pack_rc ? (u32)pack_rc : num_pkts;
 +	rec.v2 = payload_len;
 +	rec.v3 = sei_size;
++	rec.eff_len = eff_len;
++	rec.pad = eff_len && payload_len > eff_len ? payload_len - eff_len : 0;
 +	if (from_hdr10p)
 +		rec.flags |= DV_INJ_DIAG_F_HDR10P;
 +	if (payload && payload_len) {
-+		rec.crc = dv_injection_crc32(payload, payload_len);
-+		copy = payload_len < 3 ? payload_len : 3;
++		u32 span = eff_len && eff_len <= payload_len ?
++			eff_len : payload_len;
++
++		rec.crc = dv_injection_crc32(payload, span);
++		copy = span < 3 ? span : 3;
 +		memcpy(rec.prefix, payload, copy);
-+		copy = payload_len < DV_INJ_DIAG_HEX ?
-+			payload_len : DV_INJ_DIAG_HEX;
++		copy = span < DV_INJ_DIAG_HEX ? span : DV_INJ_DIAG_HEX;
 +		rec.hex_len = (u8)copy;
 +		memcpy(rec.hex, payload, copy);
-+		if (payload_len > copy)
++		if (span > copy)
 +			rec.flags |= DV_INJ_DIAG_F_TRUNC;
 +		/* An emulation prevention byte shows up as 00 00 03; the first
 +		 * offset is what decides whether the sink was handed a raw or a
 +		 * de-escaped payload.
 +		 */
-+		for (i = 0; i + 2 < payload_len; i++) {
++		for (i = 0; i + 2 < span; i++) {
 +			if (payload[i] || payload[i + 1] || payload[i + 2] != 3)
 +				continue;
 +			if (!rec.epb)
@@ -2964,6 +3012,7 @@ index 00000000..b91a0049
 +	struct dv_inj_slot *slot;
 +	unsigned long flags;
 +	u32 gen;
++	u32 dm_len = 0;
 +	int ret;
 +
 +	if (!vf || !READ_ONCE(dv_injection_enable))
@@ -2988,7 +3037,7 @@ index 00000000..b91a0049
 +
 +	if (!payload) {
 +		if (!generate_DV_from_hdr10p || !hdr10p_sei) {
-+			dv_inj_diag_producer(vf, vf->src_fmt.sei_size, NULL, 0,
++			dv_inj_diag_producer(vf, vf->src_fmt.sei_size, NULL, 0, 0,
 +					     -ENOENT, 0, 0, false);
 +			slot = &dv_inj_pool[vf->index & (DV_INJ_POOL_SIZE - 1)];
 +			spin_lock_irqsave(&dv_inj_publish_lock, flags);
@@ -3009,10 +3058,18 @@ index 00000000..b91a0049
 +		vf->src_fmt.fmt = VFRAME_SIGNAL_FMT_DOVI;
 +	}
 +
-+	ret = dv_injection_validate_metadata(payload, payload_len);
++	/* The auxiliary buffer the decoder hands over is padded to 32 bytes,
++	 * so the length reported here is an upper bound, not the metadata
++	 * length.  Only this path may accept the padding; the static metadata
++	 * path keeps the exact-length rule.
++	 */
++	dm_len = payload_len;
++	ret = dv_injection_walk_metadata(payload, payload_len,
++					 hdr10p_sei && !dv_sei ? 0 :
++					 DV_INJ_AUX_PAD_MAX, &dm_len);
 +	if (ret) {
 +		dv_inj_diag_producer(vf, vf->src_fmt.sei_size, payload,
-+				     payload_len, ret, 0, 0,
++				     payload_len, 0, ret, 0, 0,
 +				     hdr10p_sei && !dv_sei);
 +		slot = &dv_inj_pool[vf->index & (DV_INJ_POOL_SIZE - 1)];
 +		spin_lock_irqsave(&dv_inj_publish_lock, flags);
@@ -3030,9 +3087,10 @@ index 00000000..b91a0049
 +	slot = &dv_inj_pool[vf->index & (DV_INJ_POOL_SIZE - 1)];
 +	dm_packet.num_pkts = 0;
 +	ret = dv_injection_pack_bytes(dm_packet.byte_data,
-+				      &dm_packet.num_pkts, payload, payload_len);
++				      &dm_packet.num_pkts, payload, dm_len);
 +	dv_inj_diag_producer(vf, vf->src_fmt.sei_size, payload, payload_len,
-+			     0, ret, dm_packet.num_pkts, hdr10p_sei && !dv_sei);
++			     dm_len, 0, ret, dm_packet.num_pkts,
++			     hdr10p_sei && !dv_sei);
 +	if (!ret) {
 +		dv_injection_expand_pixels(dm_packet.byte_data,
 +					   dm_packet.num_pkts,
@@ -3331,23 +3389,23 @@ index 00000000..b91a0049
 +		spin_unlock_irqrestore(&dv_inj_diag_lock, flags);
 +
 +		if (rec.kind == DV_INJ_DIAG_KIND_FRAME) {
-+			seq_printf(m, "%u frame %u %u %u %u 0x%x 0x%x %u %u 0x%08x %u %u 0x%x %02x%02x%02x ",
++			seq_printf(m, "%u frame ms=%u idx=%u slot=%u gen=%u mgen=%u validate=0x%x pack=0x%x num_pkts=%u len=%u eff=%u pad=%u sei=%u crc=%08x epb=%u epb_first=%u flags=0x%x prefix=%02x%02x%02x ",
 +				   rec.seq, rec.ms, rec.frame, rec.slot,
 +				   rec.generation, rec.mode_gen, rec.v0, rec.v1,
-+				   rec.v2, rec.v3, rec.crc, rec.epb,
-+				   rec.epb_first, rec.flags, rec.prefix[0],
-+				   rec.prefix[1], rec.prefix[2]);
++				   rec.v2, rec.v2, rec.eff_len, rec.pad, rec.v3,
++				   rec.crc, rec.epb, rec.epb_first, rec.flags,
++				   rec.prefix[0], rec.prefix[1], rec.prefix[2]);
 +		} else if (rec.kind == DV_INJ_DIAG_KIND_COMMIT) {
-+			seq_printf(m, "%u commit %u %s %u %u %u 0x%x %u %u %u %08x %u %u 0x%x - ",
++			seq_printf(m, "%u commit ms=%u reason=%s slot=%u gen=%u mgen=%u code=0x%x num_pkts=%u pages=%u page_bytes=%u crc=%08x epb=%u epb_first=%u flags=0x%x prefix=- ",
 +				   rec.seq, rec.ms, dv_inj_diag_reason_name(rec.v0),
 +				   rec.slot, rec.generation, rec.mode_gen, rec.v0,
 +				   rec.v1, rec.v2, rec.v3, rec.crc, rec.epb,
 +				   rec.epb_first, rec.flags);
 +		} else {
-+			seq_printf(m, "%u format %u state=%u - %u 0x%x %u %u %u %08x %u %u 0x%x - ",
-+				   rec.seq, rec.ms, rec.slot, rec.generation,
-+				   rec.v0, rec.v1, rec.v2, rec.v3, rec.crc,
-+				   rec.epb, rec.epb_first, rec.flags);
++			seq_printf(m, "%u format ms=%u tag=%u state=%u gen=%u vic=0x%x cs=%u cd=%u cr=%u crc=%08x epb=%u epb_first=%u flags=0x%x prefix=- ",
++				   rec.seq, rec.ms, rec.v0, rec.slot,
++				   rec.generation, rec.v1, rec.v2, rec.v3,
++				   rec.crc, rec.epb, rec.epb_first, rec.flags);
 +		}
 +		for (j = 0; j < rec.hex_len; j++)
 +			seq_printf(m, "%02x", rec.hex[j]);
@@ -3420,7 +3478,7 @@ index 00000000..b91a0049
 +MODULE_AUTHOR("N1-CoreELEC project");
 +MODULE_LICENSE("GPL");
 diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/video_sink/video.c
-index a93fd945..185371f1 100644
+index a93fd94..185371f 100644
 --- a/drivers/amlogic/media/video_sink/video.c
 +++ b/drivers/amlogic/media/video_sink/video.c
 @@ -44,6 +44,9 @@
@@ -3505,7 +3563,7 @@ index a93fd945..185371f1 100644
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
-index 933287c0..615fb334 100644
+index 933287c..615fb33 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 @@ -49,6 +49,9 @@
@@ -3766,7 +3824,7 @@ index 933287c0..615fb334 100644
  struct hdr10plus_para hsty_hdr10p_config_data[8];
  unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
-index ff4ad3ec..7851c134 100644
+index ff4ad3e..7851c13 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
 @@ -35,6 +35,7 @@
@@ -3873,7 +3931,7 @@ index ff4ad3ec..7851c134 100644
 +EXPORT_SYMBOL(hdmitx_reconfigure_video_format_hw);
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 00000000..cc229fdd
+index 0000000..cc229fd
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
 @@ -0,0 +1,36 @@
