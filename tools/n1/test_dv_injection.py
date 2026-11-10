@@ -112,6 +112,7 @@ static bool dv_inj_pending, dv_inj_pending_clear, dv_inj_pending_restore;
 static u32 dv_inj_pending_gen;
 static bool dv_inj_transport_ready;
 static u32 dv_inj_mode_generation;
+static u32 dv_inj_prepare_failures;
 static void dv_injection_log(int level, const char *fmt, ...) { (void)level; (void)fmt; }
 
 static unsigned long dv_injection_torn_frames;
@@ -175,10 +176,19 @@ static int prepare_notifies = 0;
  */
 static bool hdmitx_rgb_transport_active;
 static bool hdmitx_prog_rgb;
+/* The transport policy parameter itself is compiled out of the contract
+ * binary together with the diagnostic block, so only the value the driver
+ * was told about is recorded here.
+ */
+static int hdmitx_policy_applied = -1;
 static void dv_injection_notify_output_lost(void);
 static void hdmitx_set_dv_injection_transport(bool enable)
 {
 	hdmitx_rgb_transport_active = enable;
+}
+static void hdmitx_set_dv_injection_policy(int policy)
+{
+	hdmitx_policy_applied = policy;
 }
 static void hdmitx_reconfigure_video_format(void)
 {
@@ -194,6 +204,23 @@ static int hdmitx_prepare_output_for_injection(void)
 		hdmitx_reconfigure_video_format();
 	return prepare_result;
 }
+/* The restore of the native output format can fail while the transmitter is
+ * busy; the closing transaction has to survive that and try again.
+ */
+static int restore_calls = 0;
+static int hdmitx_restore_output_format(void)
+{
+	restore_calls++;
+	transport_requested_during_prepare = dv_inj_transport_requested ? 1 : 0;
+	if (!prepare_result)
+		hdmitx_reconfigure_video_format();
+	return prepare_result;
+}
+/* The kernel print helpers are not available on the host.
+ */
+static void pr_err(const char *fmt, ...) { (void)fmt; }
+static void pr_warn(const char *fmt, ...) { (void)fmt; }
+static void pr_info(const char *fmt, ...) { (void)fmt; }
 static bool hdmitx_transport_is_live(void)
 {
 	return transport_ok && hdmitx_prog_rgb;
@@ -267,6 +294,10 @@ static int param_set_uint(const char *val,const struct kernel_param *kp)
 { char *end; unsigned long v; if(!val) return -1;
   v=strtoul(val,&end,0); if(*end) return -1;
   *(unsigned int *)kp->arg=(unsigned int)v; return 0; }
+static int param_set_int(const char *val,const struct kernel_param *kp)
+{ char *end; long v; if(!val) return -1;
+  v=strtol(val,&end,0); if(*end) return -1;
+  *(int *)kp->arg=(int)v; return 0; }
 struct seq_file { char *buf; size_t len; size_t cap; };
 static void seq_putc(struct seq_file *m,char c)
 { if(m->len+1<m->cap) { m->buf[m->len++]=c; m->buf[m->len]=0; } }
@@ -416,6 +447,7 @@ static void reset(void) {
     dm_metadata_size=181; dv_injection_path=0;
     always_send_vsif=true; sink.ieeeoui=0x00d046;
     video_on=1; canvas_result=0; send_result=0;
+    prepare_calls=0; restore_calls=0; transport_requested_during_prepare=-1;
 }
 static void test_lifecycle(void) {
     struct kernel_param kp={&dv_injection_enable};
@@ -706,9 +738,9 @@ static void test_state_machine(void) {
     dv_injection_new_stream();                        /* UNREG while closing */
     assert(dv_inj_pending);
     assert(dv_inj_pending_restore);                   /* obligation merged, not dropped */
-    prepare_calls = 0; transport_requested_during_prepare = -1;
+    prepare_calls = 0; restore_calls = 0; transport_requested_during_prepare = -1;
     dv_inj_watchdog_fn(NULL);
-    assert(prepare_calls >= 1);                       /* restore really ran */
+    assert(restore_calls >= 1);                       /* restore really ran */
     assert(transport_requested_during_prepare == 0);      /* without the transport request */
     assert(!dv_inj_pending && dv_inj_state==DV_INJ_IDLE);
 
@@ -722,9 +754,9 @@ static void test_state_machine(void) {
     assert(dv_inj_pending_restore);
     dv_injection_reset_stream();                      /* RESET while closing */
     assert(dv_inj_pending && dv_inj_pending_restore);
-    prepare_calls = 0; transport_requested_during_prepare = -1;
+    prepare_calls = 0; restore_calls = 0; transport_requested_during_prepare = -1;
     dv_inj_watchdog_fn(NULL);
-    assert(prepare_calls >= 1);
+    assert(restore_calls >= 1);
     assert(transport_requested_during_prepare == 0);
 
     /* A failing restore keeps the obligation even if a stop arrives. */
@@ -1032,6 +1064,7 @@ class KernelInjectionTests(unittest.TestCase):
                  "dv_injection_new_stream",
                  "dv_injection_stream_started", "dv_injection_reset_stream",
                  "dv_injection_begin_close", "dv_injection_begin_close_locked",
+                 "dv_inj_sink_supports_dv",
                  "dv_inj_prepare_locked", "dv_inj_watchdog_fn",
                  "dv_injection_render_slot", "dv_injection_enable_set",
                  "should_block_vsif", "dv_injection_block_hdr10",
