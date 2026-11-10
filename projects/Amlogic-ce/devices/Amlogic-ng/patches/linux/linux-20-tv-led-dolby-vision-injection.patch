@@ -176,10 +176,10 @@ index 942f1761..05d1d938 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 00000000..460eb8b5
+index 00000000..7c4cc0a6
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,3409 @@
+@@ -0,0 +1,3410 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -661,7 +661,8 @@ index 00000000..460eb8b5
 +
 +static unsigned int dv_injection_log_level;
 +module_param(dv_injection_log_level, uint, 0644);
-+MODULE_PARM_DESC(dv_injection_log_level, "\n dv injection log level\n");
++MODULE_PARM_DESC(dv_injection_log_level,
++\n dv injection log level: 0 errors only, 1 state transitions, 2 per frame metadata, 3 per frame hex dump\n");
 +
 +#define dv_injection_log(level, x...) \
 +	do { \
@@ -1497,7 +1498,7 @@ index 00000000..460eb8b5
 +					dv_inj_vsif_tunnel_mode(),
 +					&vsif, false))
 +		return -EAGAIN;
-+	dv_injection_log(2, "dv injection: VSIF sent\n");
++	dv_injection_log(3, "dv injection: VSIF sent\n");
 +	return 0;
 +}
 +
@@ -2370,18 +2371,18 @@ index 00000000..460eb8b5
 +    ext_block->length = 0;
 +    ext_block->data = NULL;
 +
-+	dv_injection_log(2, "num_blocks: %d\n", num_blocks);
++	dv_injection_log(3, "num_blocks: %d\n", num_blocks);
 +    for(i = 0; i < num_blocks; i++){
 +        uint32_t block_length = (block_ptr[0] << 24) | (block_ptr[1] << 16) | (block_ptr[2] << 8) | (block_ptr[3]);
 +        uint8_t block_level = block_ptr[4];
-+        dv_injection_log(2, "\n");
-+        dv_injection_log(2, "block: %d\n", i+1);
-+        dv_injection_log(2, "block_length: %d\n", block_length);
-+        dv_injection_log(2, "block_level: %d\n",  block_level);
++        dv_injection_log(3, "\n");
++        dv_injection_log(3, "block: %d\n", i+1);
++        dv_injection_log(3, "block_length: %d\n", block_length);
++        dv_injection_log(3, "block_level: %d\n",  block_level);
 +        for(j = 0; j < block_length; j++){
-+            dv_injection_log(2, "0x%02x, ",  block_ptr[5+j]);
++            dv_injection_log(3, "0x%02x, ",  block_ptr[5+j]);
 +        }
-+        dv_injection_log(2, "\n");
++        dv_injection_log(3, "\n");
 +
 +        if(block_level == ext_block->level){
 +            ext_block->length = block_length;
@@ -2405,7 +2406,7 @@ index 00000000..460eb8b5
 +    uint16_t horz_diff;
 +
 +	if(time_before(jiffies, last_osd_ioctl_time + msecs_to_jiffies(osd_L5_timeout_ms))){
-+		dv_injection_log(1, "removing L5 for gui\n");
++		dv_injection_log(2, "removing L5 for gui\n");
 +		L5->active_area_left_offset = 0;
 +		L5->active_area_right_offset = 0;
 +		L5->active_area_top_offset = 0;
@@ -2416,7 +2417,7 @@ index 00000000..460eb8b5
 +    switch (mode) {
 +        case REMOVED:
 +        default:
-+            dv_injection_log(1, "removing L5\n");
++            dv_injection_log(2, "removing L5\n");
 +            L5->active_area_left_offset = 0;
 +            L5->active_area_right_offset = 0;
 +            L5->active_area_top_offset = 0;
@@ -2424,12 +2425,12 @@ index 00000000..460eb8b5
 +            changed = true;
 +            break;
 +        case ORIGINAL:
-+            dv_injection_log(1, "untouched L5\n");
++            dv_injection_log(2, "untouched L5\n");
 +            break;
 +        case AUTO:
-+            dv_injection_log(1, "auto L5\n");
++            dv_injection_log(2, "auto L5\n");
 +            if(video_width == 1920){
-+                dv_injection_log(1, "adjusting for 1920 with 4K output\n");
++                dv_injection_log(2, "adjusting for 1920 with 4K output\n");
 +                // 1920 video, played back with a 4K output, double offsets to match
 +                video_width *= 2;
 +                video_height *= 2;
@@ -2440,22 +2441,22 @@ index 00000000..460eb8b5
 +            }
 +
 +            vert_diff = (screen_height - video_height) / 2;
-+            dv_injection_log(1, "vert_diff: %d\n", vert_diff);
++            dv_injection_log(2, "vert_diff: %d\n", vert_diff);
 +            L5->active_area_top_offset += vert_diff;
 +            L5->active_area_bottom_offset += vert_diff;
 +
 +            horz_diff = (screen_width - video_width) / 2;
-+            dv_injection_log(1, "horz_diff: %d\n", horz_diff);
++            dv_injection_log(2, "horz_diff: %d\n", horz_diff);
 +            L5->active_area_left_offset += horz_diff;
 +            L5->active_area_right_offset += horz_diff;
 +
 +            changed = true;
 +
 +        case METADATA_ONLY:
-+            dv_injection_log(1, "Checking if L5 adjustment needed for metadata\n");
++            dv_injection_log(2, "Checking if L5 adjustment needed for metadata\n");
 +
 +            if(L5->active_area_top_offset < MAX_METADATA_ROWS_4K){
-+               dv_injection_log(1, "adjusting L5 for metadata\n");
++               dv_injection_log(2, "adjusting L5 for metadata\n");
 +               L5->active_area_top_offset = MAX_METADATA_ROWS_4K;
 +                changed = true;
 +            }
@@ -2497,12 +2498,12 @@ index 00000000..460eb8b5
 +        source_min_pq = (dm_metadata[SOURCE_MIN_PQ_OFFSET] << 8) | dm_metadata[SOURCE_MIN_PQ_OFFSET + 1];
 +        source_max_pq = (dm_metadata[SOURCE_MAX_PQ_OFFSET] << 8) | dm_metadata[SOURCE_MAX_PQ_OFFSET + 1];
 +        if(L1.min_pq < source_min_pq){
-+			dv_injection_log(1, "L1.min_pq adjusted to source_min_pq. Changed from %u to %u\n", L1.min_pq, source_min_pq);
++			dv_injection_log(2, "L1.min_pq adjusted to source_min_pq. Changed from %u to %u\n", L1.min_pq, source_min_pq);
 +            L1.min_pq = source_min_pq;
 +            metadata_changed = true;
 +        }
 +        if(L1.max_pq > source_max_pq){
-+            dv_injection_log(1, "L1.max_pq adjusted to source_max_pq. Changed from %u to %u\n", L1.max_pq, source_max_pq);
++            dv_injection_log(2, "L1.max_pq adjusted to source_max_pq. Changed from %u to %u\n", L1.max_pq, source_max_pq);
 +            L1.max_pq = source_max_pq;
 +            metadata_changed = true;
 +        }
@@ -2570,8 +2571,8 @@ index 00000000..460eb8b5
 +                *dv_sei_payload = &p[DV_SEI_VDR_HEADER_LENGTH];
 +                payload_size = size - DV_SEI_VDR_HEADER_LENGTH;
 +				if(dv_injection_log_level){
-+					dv_injection_log(1, "Found DV data in sei\n");
-+					dv_injection_log(2, "size: %d, data:\n", payload_size);
++					dv_injection_log(2, "Found DV data in sei\n");
++					dv_injection_log(3, "size: %d, data:\n", payload_size);
 +					for(i = 0; i < payload_size; i++){
 +						dv_injection_log_cont(2, "0x%02x, ", dv_sei_payload[i]);
 +					}
@@ -2591,7 +2592,7 @@ index 00000000..460eb8b5
 +                p[8] == 0x01 &&
 +                p[9] == 0x04)
 +            { 
-+                dv_injection_log(1, "Found HDR10+ data in sei\n");
++                dv_injection_log(2, "Found HDR10+ data in sei\n");
 +                *hdr10p_sei_payload = &p[4];
 +                payload_size = p[3];
 +            }
@@ -3023,9 +3024,9 @@ index 00000000..460eb8b5
 +    uint16_t L1_max_pq = clamp16(max_pq, (uint16_t) L1_MAX_PQ_MIN_VALUE, (uint16_t) L1_MAX_PQ_MAX_VALUE);
 +    uint16_t L1_avg_pq = clamp16(avg_pq, (uint16_t) L1_AVG_PQ_MIN_VALUE_CMV40, L1_max_pq - 1);
 +
-+	dv_injection_log(1, "L1_min_pq from HDR10+ is: %d\n", L1_min_pq);
-+	dv_injection_log(1, "L1_max_pq from HDR10+ is: %d\n", L1_max_pq);
-+	dv_injection_log(1, "L1_avg_pq from HDR10+ is: %d\n", L1_avg_pq);
++	dv_injection_log(2, "L1_min_pq from HDR10+ is: %d\n", L1_min_pq);
++	dv_injection_log(2, "L1_max_pq from HDR10+ is: %d\n", L1_max_pq);
++	dv_injection_log(2, "L1_avg_pq from HDR10+ is: %d\n", L1_avg_pq);
 +
 +    // Set L1 
 +    extension_block ext_block;
@@ -3158,7 +3159,7 @@ index 00000000..460eb8b5
 +			mutex_unlock(&dv_injection_lock);
 +			return;
 +		}
-+		dv_injection_log(1, "dv injection: building DV metadata from HDR10+\n");
++		dv_injection_log(2, "dv injection: building DV metadata from HDR10+\n");
 +		memcpy(dv_inj_hdr10p_dm, dv_inj_hdr10p_template,
 +		       sizeof(dv_inj_hdr10p_dm));
 +		form_dv_sei_payload_from_hdr10plus(hdr10p_sei, payload_len,
