@@ -8,7 +8,7 @@
  #include <math.h>
  
  #include "DVDCodecs/DVDFactoryCodec.h"
-@@ -324,6 +325,13 @@
+@@ -324,6 +325,17 @@
            }
          }
        }
@@ -16,8 +16,12 @@
 +      /* N1 TV-led injection: the HEVC converter must rewrite the RPU into the
 +       * HDMI DM serialisation the kernel packetizer expects.  This is
 +       * independent of aml_support_dolby_vision(), which is false on GXL, and
-+       * opt-in through a flag file only. */
-+      if (m_bitstream && access("/storage/.config/n1-dv-injection", F_OK) == 0)
++       * opt-in through a flag file only.  The flag is accepted either in the
++       * writable storage partition or from the read-only copy shipped in the
++       * image, so a freshly written stick behaves like a configured one. */
++      if (m_bitstream &&
++          (access("/storage/.config/n1-dv-injection", F_OK) == 0 ||
++           access("/usr/share/n1-dv-injection", F_OK) == 0))
 +        m_bitstream->SetConvertDovi(true);
  
        // make sure we do not leak the existing m_hints.extradata

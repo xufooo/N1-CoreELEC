@@ -176,10 +176,10 @@ index 942f1761..05d1d938 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 00000000..7c4cc0a6
+index 00000000..058fbbe9
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
-@@ -0,0 +1,3410 @@
+@@ -0,0 +1,3412 @@
 +/*
 + * Amlogic TV-led Dolby Vision metadata injection (Phicomm N1 / GXL)
 + *
@@ -1467,6 +1467,8 @@ index 00000000..7c4cc0a6
 +		return YUV422_BIT12;
 +	if (READ_ONCE(dv_injection_transport) == 2)
 +		return RGB_10_12BIT;
++	if (READ_ONCE(dv_injection_transport) == 4)
++		return YUV444_10_12BIT;
 +	return RGB_8BIT;
 +}
 +
@@ -3676,7 +3678,7 @@ index a93fd945..185371f1 100644
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
-index 933287c0..c027955a 100644
+index 933287c0..2c913058 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 @@ -49,6 +49,9 @@
@@ -3716,7 +3718,7 @@ index 933287c0..c027955a 100644
  void hdmitx_set_vsif_pkt(enum eotf_type type, enum mode_type
  	tunnel_mode, struct dv_vsif_para *data, bool switch_to_sdr);
  static void hdmitx_set_hdr10plus_pkt(unsigned int flag,
-@@ -94,6 +108,10 @@ static void edidinfo_detach_to_vinfo(struct hdmitx_dev *hdev);
+@@ -94,6 +108,12 @@ static void edidinfo_detach_to_vinfo(struct hdmitx_dev *hdev);
  static bool is_cur_tmds_div40(struct hdmitx_dev *hdev);
  static void hdmitx_resend_div40(struct hdmitx_dev *hdev);
  static unsigned int hdmitx_get_frame_duration(void);
@@ -3724,10 +3726,12 @@ index 933287c0..c027955a 100644
 +extern void hdmitx_reconfigure_video_format_hw(void);
 +extern bool hdmitx_transport_is_rgb444_8bit(void);
 +extern bool hdmitx_transport_matches_policy(void);
++extern enum hdmi_color_space hdmitx_dvi_avi_colorspace(
++	enum mode_type tunnel_mode);
  
  static DEFINE_MUTEX(setclk_mutex);
  static DEFINE_MUTEX(getedid_mutex);
-@@ -103,6 +121,119 @@ static struct hdmitx_dev hdmitx_device = {
+@@ -103,6 +123,119 @@ static struct hdmitx_dev hdmitx_device = {
  	.cec_func_config = 0x7f
  };
  
@@ -3847,7 +3851,7 @@ index 933287c0..c027955a 100644
  static const struct dv_info dv_dummy;
  static int log_level;
  static bool dovi_tv_led_bt2020 = false;
-@@ -374,6 +505,12 @@ static int hdmitx_reboot_notifier(struct notifier_block *nb,
+@@ -374,6 +507,12 @@ static int hdmitx_reboot_notifier(struct notifier_block *nb,
  		hdev->debug_param.avmute_frame * hdmitx_get_frame_duration();
  
  	hdev->ready = 0;
@@ -3860,7 +3864,7 @@ index 933287c0..c027955a 100644
  	hdev->hwop.cntlmisc(hdev, MISC_AVMUTE_OP, SET_AVMUTE);
  	if (hdev->debug_param.avmute_frame > 0)
  		msleep(mute_us / 1000);
-@@ -615,6 +752,12 @@ static int set_disp_mode_auto(void)
+@@ -615,6 +754,12 @@ static int set_disp_mode_auto(void)
  
  	memset(mode, 0, sizeof(mode));
  	hdev->ready = 0;
@@ -3873,7 +3877,7 @@ index 933287c0..c027955a 100644
  
  	/* get current vinfo */
  	info = hdmitx_get_current_vinfo();
-@@ -686,6 +829,8 @@ static int set_disp_mode_auto(void)
+@@ -686,6 +831,8 @@ static int set_disp_mode_auto(void)
  				int cs = para->cs;
  				switch (hdev->hdmi_current_tunnel_mode) {
  					case RGB_8BIT:
@@ -3882,7 +3886,7 @@ index 933287c0..c027955a 100644
  					case RGB_10_12BIT:
  						para->cs = COLORSPACE_YUV444;
  						break;
-@@ -1677,7 +1822,7 @@ static void hdmitx_set_drm_pkt(struct master_display_info_s *data)
+@@ -1677,7 +1824,7 @@ static void hdmitx_set_drm_pkt(struct master_display_info_s *data)
  	if (hdmitx_dv_en()) {
  		update_current_para(hdev);
  		hdev->hwop.cntlconfig(hdev, CONF_AVI_RGBYCC_INDIC,
@@ -3891,7 +3895,7 @@ index 933287c0..c027955a 100644
  /* if using VSIF/DOVI, then only clear DV_VS10_SIG, else disable VSIF */
  		if (hdev->hwop.cntlconfig(hdev, CONF_CLR_DV_VS10_SIG, 0) == 0)
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, NULL, NULL);
-@@ -1860,7 +2005,7 @@ void update_current_para(struct hdmitx_dev *hdev)
+@@ -1860,7 +2007,7 @@ void update_current_para(struct hdmitx_dev *hdev)
  struct vsif_debug_save vsif_debug_info;
  struct vsif_debug_save hsty_vsif_config_data[8];
  unsigned int hsty_vsif_config_loc, hsty_vsif_config_num;
@@ -3900,7 +3904,7 @@ index 933287c0..c027955a 100644
  	enum mode_type tunnel_mode, struct dv_vsif_para *data, bool signal_sdr)
  {
  	struct hdmitx_dev *hdev = &hdmitx_device;
-@@ -1874,12 +2019,9 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -1874,12 +2021,9 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	static enum eotf_type ltype = EOTF_T_NULL;
  	static uint8_t ltmode = -1;
  	enum hdmi_tf_type hdr_type = HDMI_NONE;
@@ -3913,7 +3917,7 @@ index 933287c0..c027955a 100644
  		return;
  	}
  	if (data == NULL)
-@@ -1904,7 +2046,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -1904,7 +2048,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	if (hdev->ready == 0) {
  		ltype = EOTF_T_NULL;
  		ltmode = -1;
@@ -3921,7 +3925,7 @@ index 933287c0..c027955a 100644
  		return;
  	}
  	if (hdev->rxcap.dv_info.ieeeoui != DV_IEEE_OUI) {
-@@ -1913,7 +2054,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -1913,7 +2056,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  	}
  	if ((hdev->chip_type) < MESON_CPU_ID_GXL) {
  		pr_info("hdmitx: not support DolbyVision\n");
@@ -3929,7 +3933,7 @@ index 933287c0..c027955a 100644
  		return;
  	}
  
-@@ -1984,7 +2124,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -1984,7 +2126,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB1, VEN_HB);
@@ -3937,7 +3941,42 @@ index 933287c0..c027955a 100644
  			return;
  		}
  		if (type == EOTF_T_DOLBYVISION) {
-@@ -2035,7 +2174,8 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -2011,18 +2152,22 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+ 				}
+ 			}
+ 
+-			if (tunnel_mode == RGB_8BIT) {
+-				hdev->hwop.cntlconfig(hdev,
+-					CONF_AVI_RGBYCC_INDIC,
+-					COLORSPACE_RGB444);
+-				hdev->hwop.cntlconfig(hdev, CONF_AVI_Q01,
+-					RGB_RANGE_FUL);
+-			} else {
+-				hdev->hwop.cntlconfig(hdev,
+-					CONF_AVI_RGBYCC_INDIC,
+-					COLORSPACE_YUV422);
+-				hdev->hwop.cntlconfig(hdev, CONF_AVI_YQ01,
+-					YCC_RANGE_FUL);
++			{
++				enum hdmi_color_space avi_cs =
++					hdmitx_dvi_avi_colorspace(tunnel_mode);
++				if (avi_cs == COLORSPACE_RGB444) {
++					hdev->hwop.cntlconfig(hdev,
++						CONF_AVI_RGBYCC_INDIC,
++						COLORSPACE_RGB444);
++					hdev->hwop.cntlconfig(hdev, CONF_AVI_Q01,
++						RGB_RANGE_FUL);
++				} else {
++					hdev->hwop.cntlconfig(hdev,
++						CONF_AVI_RGBYCC_INDIC,
++						avi_cs);
++					hdev->hwop.cntlconfig(hdev, CONF_AVI_YQ01,
++						YCC_RANGE_FUL);
++				}
+ 			}
+ 		} else {
+ 			if (hdmi_vic_4k_flag)
+@@ -2035,7 +2180,8 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  				pr_info("hdmitx: H14b VSIF, switching signal to SDR\n");
  				update_current_para(hdev);
  				hdev->hwop.cntlconfig(hdev,
@@ -3947,7 +3986,7 @@ index 933287c0..c027955a 100644
  				hdev->hwop.cntlconfig(hdev,
  					CONF_AVI_Q01, RGB_RANGE_DEFAULT);
  				hdev->hwop.cntlconfig(hdev,
-@@ -2102,7 +2242,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -2102,7 +2248,6 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  		}
  		if (type == EOTF_T_DV_AHEAD) {
  			hdev->hwop.setpacket(HDMI_PACKET_VEND, VEN_DB2, VEN_HB);
@@ -3955,7 +3994,42 @@ index 933287c0..c027955a 100644
  			return;
  		}
  		/*Dolby Vision standard case*/
-@@ -2190,7 +2329,8 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -2130,18 +2275,22 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+ 				}
+ 			}
+ 
+-			if (tunnel_mode == RGB_8BIT) {/*RGB444*/
+-				hdev->hwop.cntlconfig(hdev,
+-					CONF_AVI_RGBYCC_INDIC,
+-					COLORSPACE_RGB444);
+-				hdev->hwop.cntlconfig(hdev, CONF_AVI_Q01,
+-					RGB_RANGE_FUL);
+-			} else {/*YUV422*/
+-				hdev->hwop.cntlconfig(hdev,
+-					CONF_AVI_RGBYCC_INDIC,
+-					COLORSPACE_YUV422);
+-				hdev->hwop.cntlconfig(hdev, CONF_AVI_YQ01,
+-					YCC_RANGE_FUL);
++			{
++				enum hdmi_color_space avi_cs =
++					hdmitx_dvi_avi_colorspace(tunnel_mode);
++				if (avi_cs == COLORSPACE_RGB444) {
++					hdev->hwop.cntlconfig(hdev,
++						CONF_AVI_RGBYCC_INDIC,
++						COLORSPACE_RGB444);
++					hdev->hwop.cntlconfig(hdev, CONF_AVI_Q01,
++						RGB_RANGE_FUL);
++				} else {
++					hdev->hwop.cntlconfig(hdev,
++						CONF_AVI_RGBYCC_INDIC,
++						avi_cs);
++					hdev->hwop.cntlconfig(hdev, CONF_AVI_YQ01,
++						YCC_RANGE_FUL);
++				}
+ 			}
+ 		}
+ 		/*Dolby Vision low-latency case*/
+@@ -2190,7 +2339,8 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  					hdev->para->vic, hdev->para->cd,
  					hdev->para->cs, hdev->para->cr);
  				hdev->hwop.cntlconfig(hdev,
@@ -3965,7 +4039,7 @@ index 933287c0..c027955a 100644
  				hdev->hwop.cntlconfig(hdev,
  					CONF_AVI_Q01, RGB_RANGE_DEFAULT);
  				hdev->hwop.cntlconfig(hdev,
-@@ -2200,9 +2340,38 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
+@@ -2200,9 +2350,38 @@ void hdmitx_set_vsif_pkt(enum eotf_type type,
  			}
  		}
  	}
@@ -4006,7 +4080,7 @@ index 933287c0..c027955a 100644
  struct hdr10plus_para hsty_hdr10p_config_data[8];
  unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
-index ff4ad3ec..5aa2348a 100644
+index ff4ad3ec..06387b62 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
 @@ -35,6 +35,7 @@
@@ -4119,7 +4193,7 @@ index ff4ad3ec..5aa2348a 100644
  
  	if (hdev->cur_video_param == NULL) {
  		pr_info("error at null vidpara!\n");
-@@ -5478,11 +5570,106 @@ static void hdmitx_set_hw(struct hdmitx_dev *hdev)
+@@ -5478,11 +5570,122 @@ static void hdmitx_set_hw(struct hdmitx_dev *hdev)
  		return;
  	}
  
@@ -4203,6 +4277,22 @@ index ff4ad3ec..5aa2348a 100644
 +	return cs;
 +}
 +EXPORT_SYMBOL(hdmitx_avi_color_space);
++
++enum hdmi_color_space hdmitx_dvi_avi_colorspace(enum mode_type tunnel_mode)
++{
++	/* The vendor path can only announce RGB444 (the RGB 8 bit tunnel)
++	 * or YUV422 (every other tunnel).  When the injection drives a
++	 * YUV444 output the announcement has to follow the samples on the
++	 * wire, otherwise the sink reads YUV data as RGB.
++	 */
++	if (hdmitx_dv_injection_rgb_transport &&
++	    hdmitx_dv_injection_policy == DV_INJ_TP_YUV444_8BIT)
++		return COLORSPACE_YUV444;
++	if (tunnel_mode == RGB_8BIT)
++		return COLORSPACE_RGB444;
++	return COLORSPACE_YUV422;
++}
++EXPORT_SYMBOL(hdmitx_dvi_avi_colorspace);
 +
 +/* Format that is really programmed, for the diagnostic trace. */
 +void hdmitx_transport_programmed_cs_cd(u32 *cs, u32 *cd)
