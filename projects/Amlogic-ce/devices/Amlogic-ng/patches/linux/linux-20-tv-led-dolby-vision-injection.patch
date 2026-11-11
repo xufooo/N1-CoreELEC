@@ -662,7 +662,7 @@ index 00000000..bd62aade
 +static unsigned int dv_injection_log_level;
 +module_param(dv_injection_log_level, uint, 0644);
 +MODULE_PARM_DESC(dv_injection_log_level,
-+\n dv injection log level: 0 errors only, 1 state transitions, 2 per frame metadata, 3 per frame hex dump\n");
++		 "\n 0 errors only, 1 state transitions, 2 per frame metadata, 3 per frame hex dump\n");
 +
 +#define dv_injection_log(level, x...) \
 +	do { \
