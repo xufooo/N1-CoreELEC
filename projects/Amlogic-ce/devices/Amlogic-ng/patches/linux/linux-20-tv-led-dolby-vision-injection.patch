@@ -1,5 +1,5 @@
 diff --git a/drivers/amlogic/media/enhancement/amvecm/amcsc.c b/drivers/amlogic/media/enhancement/amvecm/amcsc.c
-index bc9ac744..95845cf3 100644
+index bc9ac74..95845cf 100644
 --- a/drivers/amlogic/media/enhancement/amvecm/amcsc.c
 +++ b/drivers/amlogic/media/enhancement/amvecm/amcsc.c
 @@ -43,6 +43,9 @@
@@ -28,7 +28,7 @@ index bc9ac744..95845cf3 100644
  		vdev = vinfo->vout_device;
  
 diff --git a/drivers/amlogic/media/osd/osd_fb.c b/drivers/amlogic/media/osd/osd_fb.c
-index 192948b9..c5c0e027 100644
+index 192948b..c5c0e02 100644
 --- a/drivers/amlogic/media/osd/osd_fb.c
 +++ b/drivers/amlogic/media/osd/osd_fb.c
 @@ -28,6 +28,9 @@
@@ -69,7 +69,7 @@ index 192948b9..c5c0e027 100644
  			if (fb_ion_client &&
  			    fb_ion_handle[index][i]) {
 diff --git a/drivers/amlogic/media/osd/osd_hw.c b/drivers/amlogic/media/osd/osd_hw.c
-index 12d2dfc3..3719657b 100644
+index 12d2dfc..3719657 100644
 --- a/drivers/amlogic/media/osd/osd_hw.c
 +++ b/drivers/amlogic/media/osd/osd_hw.c
 @@ -34,6 +34,9 @@
@@ -139,7 +139,7 @@ index 12d2dfc3..3719657b 100644
  }
  
 diff --git a/drivers/amlogic/media/video_sink/Kconfig b/drivers/amlogic/media/video_sink/Kconfig
-index 68c8f4ba..579d13d0 100644
+index 68c8f4b..579d13d 100644
 --- a/drivers/amlogic/media/video_sink/Kconfig
 +++ b/drivers/amlogic/media/video_sink/Kconfig
 @@ -29,4 +29,16 @@ config AMLOGIC_MEDIA_VIDEOCAPTURE
@@ -160,7 +160,7 @@ index 68c8f4ba..579d13d0 100644
 +
  endmenu
 diff --git a/drivers/amlogic/media/video_sink/Makefile b/drivers/amlogic/media/video_sink/Makefile
-index 942f1761..05d1d938 100644
+index 942f176..05d1d93 100644
 --- a/drivers/amlogic/media/video_sink/Makefile
 +++ b/drivers/amlogic/media/video_sink/Makefile
 @@ -2,6 +2,10 @@ obj-y	+=	amvideo.o
@@ -176,7 +176,7 @@ index 942f1761..05d1d938 100644
  endif
 diff --git a/drivers/amlogic/media/video_sink/dv_injection.c b/drivers/amlogic/media/video_sink/dv_injection.c
 new file mode 100644
-index 00000000..bd62aade
+index 0000000..759f186
 --- /dev/null
 +++ b/drivers/amlogic/media/video_sink/dv_injection.c
 @@ -0,0 +1,3464 @@
@@ -3645,7 +3645,7 @@ index 00000000..bd62aade
 +MODULE_AUTHOR("N1-CoreELEC project");
 +MODULE_LICENSE("GPL");
 diff --git a/drivers/amlogic/media/video_sink/video.c b/drivers/amlogic/media/video_sink/video.c
-index a93fd945..185371f1 100644
+index a93fd94..185371f 100644
 --- a/drivers/amlogic/media/video_sink/video.c
 +++ b/drivers/amlogic/media/video_sink/video.c
 @@ -44,6 +44,9 @@
@@ -3730,7 +3730,7 @@ index a93fd945..185371f1 100644
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
-index 933287c0..2c913058 100644
+index 933287c..2c91305 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 @@ -49,6 +49,9 @@
@@ -4132,7 +4132,7 @@ index 933287c0..2c913058 100644
  struct hdr10plus_para hsty_hdr10p_config_data[8];
  unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
-index ff4ad3ec..ca541dc6 100644
+index ff4ad3e..e36bf71 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
 @@ -35,6 +35,7 @@
@@ -4143,13 +4143,10 @@ index ff4ad3ec..ca541dc6 100644
  #include <linux/amlogic/media/vout/hdmi_tx/hdmi_info_global.h>
  #include <linux/amlogic/media/vout/hdmi_tx/hdmi_tx_module.h>
  #include <linux/amlogic/media/vout/hdmi_tx/hdmi_tx_ddc.h>
-@@ -5328,12 +5329,21 @@ static void config_hdmi20_tx(enum hdmi_vic vic,
+@@ -5328,6 +5329,20 @@ static void config_hdmi20_tx(enum hdmi_vic vic,
  	hd_write_reg(P_ENCP_VIDEO_EN, 1); /* enable it finially */
  } /* config_hdmi20_tx */
  
--static void hdmitx_csc_config(unsigned char input_color_format,
--			unsigned char output_color_format,
--			unsigned char color_depth)
 +/* The transmitter ships with the BT.601 matrix hard wired into the colour
 + * space converter, but the content on this SoC is BT.709 (the AVI
 + * InfoFrame announces BT.709).  The injection can ask for the BT.709
@@ -4159,18 +4156,15 @@ index ff4ad3ec..ca541dc6 100644
 +static bool hdmitx_dv_injection_csc709;
 +
 +void hdmitx_set_dv_injection_csc709(bool enable)
- {
--	unsigned char conv_en;
--	unsigned char csc_scale;
++{
 +	hdmitx_dv_injection_csc709 = enable;
 +}
 +EXPORT_SYMBOL(hdmitx_set_dv_injection_csc709);
 +
-+static void hdmitx_csc_config(unsigned char input_color_format,
- 	unsigned char rgb_ycc_indicator;
- 	unsigned long csc_coeff_a1, csc_coeff_a2, csc_coeff_a3, csc_coeff_a4;
- 	unsigned long csc_coeff_b1, csc_coeff_b2, csc_coeff_b3, csc_coeff_b4;
-@@ -5406,6 +5416,21 @@ static void hdmitx_csc_config(unsigned char input_color_format,
+ static void hdmitx_csc_config(unsigned char input_color_format,
+ 			unsigned char output_color_format,
+ 			unsigned char color_depth)
+@@ -5406,6 +5421,21 @@ static void hdmitx_csc_config(unsigned char input_color_format,
  		csc_scale = 1;
  	}
  
@@ -4192,7 +4186,7 @@ index ff4ad3ec..ca541dc6 100644
  	hdmitx_wr_reg(HDMITX_DWC_CSC_COEF_A1_MSB, (csc_coeff_a1>>8)&0xff);
  	hdmitx_wr_reg(HDMITX_DWC_CSC_COEF_A1_LSB, csc_coeff_a1&0xff);
  	hdmitx_wr_reg(HDMITX_DWC_CSC_COEF_A2_MSB, (csc_coeff_a2>>8)&0xff);
-@@ -5461,10 +5486,118 @@ static void hdmitx_csc_config(unsigned char input_color_format,
+@@ -5461,10 +5491,118 @@ static void hdmitx_csc_config(unsigned char input_color_format,
  		(rgb_ycc_indicator & 0x3), 0, 2);
  }   /* hdmitx_csc_config */
  
@@ -4311,7 +4305,7 @@ index ff4ad3ec..ca541dc6 100644
  
  	if (hdev->cur_video_param == NULL) {
  		pr_info("error at null vidpara!\n");
-@@ -5478,11 +5611,134 @@ static void hdmitx_set_hw(struct hdmitx_dev *hdev)
+@@ -5478,11 +5616,134 @@ static void hdmitx_set_hw(struct hdmitx_dev *hdev)
  		return;
  	}
  
@@ -4452,7 +4446,7 @@ index ff4ad3ec..ca541dc6 100644
 +EXPORT_SYMBOL(hdmitx_reconfigure_video_format_hw);
 diff --git a/include/linux/amlogic/media/video_sink/dv_injection.h b/include/linux/amlogic/media/video_sink/dv_injection.h
 new file mode 100644
-index 00000000..cc229fdd
+index 0000000..cc229fd
 --- /dev/null
 +++ b/include/linux/amlogic/media/video_sink/dv_injection.h
 @@ -0,0 +1,36 @@
