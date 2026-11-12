@@ -3753,7 +3753,7 @@ index a93fd94..185371f 100644
  }
  EXPORT_SYMBOL(update_vframe_src_fmt);
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
-index 933287c..2c91305 100644
+index 933287c..c37516b 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hdmi_tx_main.c
 @@ -49,6 +49,9 @@
@@ -4099,7 +4099,7 @@ index 933287c..2c91305 100644
 +						CONF_AVI_RGBYCC_INDIC,
 +						avi_cs);
 +					hdev->hwop.cntlconfig(hdev, CONF_AVI_YQ01,
-+						YCC_RANGE_FUL);
++						YCC_RANGE_LIM);
 +				}
  			}
  		}
@@ -4155,7 +4155,7 @@ index 933287c..2c91305 100644
  struct hdr10plus_para hsty_hdr10p_config_data[8];
  unsigned int hsty_hdr10p_config_loc, hsty_hdr10p_config_num;
 diff --git a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
-index ff4ad3e..089a2d9 100644
+index ff4ad3e..f10bba3 100644
 --- a/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
 +++ b/drivers/amlogic/media/vout/hdmitx/hdmi_tx_20/hw/hdmi_tx_hw.c
 @@ -35,6 +35,7 @@
@@ -4166,7 +4166,44 @@ index ff4ad3e..089a2d9 100644
  #include <linux/amlogic/media/vout/hdmi_tx/hdmi_info_global.h>
  #include <linux/amlogic/media/vout/hdmi_tx/hdmi_tx_module.h>
  #include <linux/amlogic/media/vout/hdmi_tx/hdmi_tx_ddc.h>
-@@ -5328,6 +5329,20 @@ static void config_hdmi20_tx(enum hdmi_vic vic,
+@@ -53,6 +54,16 @@
+ #endif
+ #include "reg_sc2.h"
+ 
++/*
++ * The colour space and the depth of the samples the transmitter really
++ * drives.  The metadata injection overrides them, and the AVI info frame
++ * has to announce them, so they live here where every writer of the AVI
++ * can reach them.
++ */
++static bool hdmitx_dv_injection_rgb_transport;
++static enum hdmi_color_space hdmitx_prog_cs = COLORSPACE_YUV444;
++static enum hdmi_color_depth hdmitx_prog_cd = COLORDEPTH_24B;
++
+ static void mode420_half_horizontal_para(void);
+ static void hdmi_phy_suspend(void);
+ static void hdmi_phy_wakeup(struct hdmitx_dev *hdev);
+@@ -4211,6 +4222,19 @@ static int hdmitx_cntl_config(struct hdmitx_dev *hdev, unsigned int cmd,
+ 		}
+ 		break;
+ 	case CONF_AVI_RGBYCC_INDIC:
++		/*
++		 * The metadata injection drives the wire format, so the AVI
++		 * has to announce the samples that are really sent.  A sink
++		 * that reads RGB data as YUV (or the other way round) shows a
++		 * green or blue picture, and it never enters the Dolby Vision
++		 * mode because the announced format does not match.
++		 */
++		if (hdmitx_dv_injection_rgb_transport) {
++			if (hdmitx_prog_cs == COLORSPACE_RGB444)
++				argv = COLORSPACE_RGB444;
++			else if (hdmitx_prog_cs == COLORSPACE_YUV444)
++				argv = COLORSPACE_YUV444;
++		}
+ 		hdmitx_set_reg_bits(HDMITX_DWC_FC_AVICONF0, argv, 0, 2);
+ 		hdmitx_set_reg_bits(HDMITX_DWC_FC_AVICONF0, 0, 7, 1);
+ 		break;
+@@ -5328,6 +5352,20 @@ static void config_hdmi20_tx(enum hdmi_vic vic,
  	hd_write_reg(P_ENCP_VIDEO_EN, 1); /* enable it finially */
  } /* config_hdmi20_tx */
  
@@ -4187,7 +4224,7 @@ index ff4ad3e..089a2d9 100644
  static void hdmitx_csc_config(unsigned char input_color_format,
  			unsigned char output_color_format,
  			unsigned char color_depth)
-@@ -5406,6 +5421,21 @@ static void hdmitx_csc_config(unsigned char input_color_format,
+@@ -5406,6 +5444,21 @@ static void hdmitx_csc_config(unsigned char input_color_format,
  		csc_scale = 1;
  	}
  
@@ -4209,7 +4246,7 @@ index ff4ad3e..089a2d9 100644
  	hdmitx_wr_reg(HDMITX_DWC_CSC_COEF_A1_MSB, (csc_coeff_a1>>8)&0xff);
  	hdmitx_wr_reg(HDMITX_DWC_CSC_COEF_A1_LSB, csc_coeff_a1&0xff);
  	hdmitx_wr_reg(HDMITX_DWC_CSC_COEF_A2_MSB, (csc_coeff_a2>>8)&0xff);
-@@ -5461,10 +5491,118 @@ static void hdmitx_csc_config(unsigned char input_color_format,
+@@ -5461,10 +5514,115 @@ static void hdmitx_csc_config(unsigned char input_color_format,
  		(rgb_ycc_indicator & 0x3), 0, 2);
  }   /* hdmitx_csc_config */
  
@@ -4223,9 +4260,6 @@ index ff4ad3e..089a2d9 100644
 + * own, so the injection asks for an RGB 8 bit output format.  Only the HDMI
 + * output changes: the video path and the mode timing stay untouched.
 + */
-+static bool hdmitx_dv_injection_rgb_transport;
-+static enum hdmi_color_space hdmitx_prog_cs = COLORSPACE_YUV444;
-+static enum hdmi_color_depth hdmitx_prog_cd = COLORDEPTH_24B;
 +
 +/*
 + * Transport policy of the metadata injection.
@@ -4328,7 +4362,7 @@ index ff4ad3e..089a2d9 100644
  
  	if (hdev->cur_video_param == NULL) {
  		pr_info("error at null vidpara!\n");
-@@ -5478,11 +5616,147 @@ static void hdmitx_set_hw(struct hdmitx_dev *hdev)
+@@ -5478,11 +5636,147 @@ static void hdmitx_set_hw(struct hdmitx_dev *hdev)
  		return;
  	}
  
