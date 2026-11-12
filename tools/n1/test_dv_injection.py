@@ -298,6 +298,8 @@ static int param_set_int(const char *val,const struct kernel_param *kp)
 { char *end; long v; if(!val) return -1;
   v=strtol(val,&end,0); if(*end) return -1;
   *(int *)kp->arg=(int)v; return 0; }
+static int param_get_int(char *val,const struct kernel_param *kp)
+{ return snprintf(val,11,"%d",*(int *)kp->arg); }
 struct seq_file { char *buf; size_t len; size_t cap; };
 static void seq_putc(struct seq_file *m,char c)
 { if(m->len+1<m->cap) { m->buf[m->len++]=c; m->buf[m->len]=0; } }
@@ -413,23 +415,26 @@ static void test_aux_padding(void) {
 }
 static void test_layout(void) {
     u64 page; u32 pages;
-    /* Recorded 7680-byte stride x3240 canvas = 3 real1080p pages. */
+    /* Recorded 7680-byte stride x3240 canvas = 3 real 1080p pages.  The
+     * stride is counted in pixels and the canvas holds 32 bit pixels, so a
+     * page is stride * yres * 4 bytes and the whole canvas is
+     * stride * yvirtual * 4 bytes.  The allocation is a byte count. */
     assert(!dv_injection_canvas_layout(7680,1920,1080,3240,
-        24883200,2,1,&page,&pages));
-    assert(page==8294400 && pages==3);
-    /* Old4K offset33177600bytes lies outside recorded allocation. */
-    assert(page != 33177600 && page*pages <= 24883200);
+        99532800,2,1,&page,&pages));
+    assert(page==33177600 && pages==3);
+    assert(page*pages == 99532800);
+    /* A canvas that is too small for its pages must be refused. */
     assert(dv_injection_canvas_layout(7680,3840,2160,3240,
-        24883200,2,1,&page,&pages)==-EINVAL);
+        99532800,2,1,&page,&pages)==-EINVAL);
     for(unsigned r=0;r<=4;r++) {
         int ret=dv_injection_canvas_layout(15360,3840,2160,4320,
-            66355200,5,r,&page,&pages);
+            265420800,5,r,&page,&pages);
         assert((ret==0)==(r>=1 && r<=3));
     }
     assert(dv_injection_canvas_layout(7680,1920,1080,3240,
-        8294399,2,1,&page,&pages)==-EINVAL);
+        99532799,2,1,&page,&pages)==-EINVAL);
     assert(dv_injection_canvas_layout(7680,1920,1080,3241,
-        24890880,2,1,&page,&pages)==-EINVAL);
+        99537024,2,1,&page,&pages)==-EINVAL);
     assert(dv_injection_canvas_layout(4,1,1,1,4,1,1,&page,&pages)==-EINVAL);
     assert(dv_injection_canvas_layout(0xfffffffcu,1,0xffffffffu,0xffffffffu,
         UINT64_MAX,1,1,&page,&pages)==-EINVAL);
